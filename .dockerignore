@@ -1,0 +1,17 @@
+**
+!pyproject.toml
+!buna
+!buna/*.py
+!frontend
+!frontend/src
+!frontend/src/theme.css
+!deploy
+!deploy/Dockerfile
+!deploy/smoke_public.py
+!release-context
+!release-context/wheels
+!release-context/wheels/*.whl
+!release-context/public-corpus
+!release-context/public-corpus/manifest.json
+!release-context/public-corpus/*.pdf
+!release-context/public-corpus/*.txt

@@ -1,0 +1,16 @@
+Paper Overlap Detector
+Application source: GNU Affero General Public License version 3 or later.
+
+This application uses PyMuPDF under its GNU AGPL license option.
+PyMuPDF source: https://github.com/pymupdf/PyMuPDF
+MuPDF source: https://git.ghostscript.com/?p=mupdf.git
+Release dependency versions and hashes: deploy/requirements-linux.lock
+
+Other dependencies retain their respective upstream licenses. This notice is not
+a claim that their trademarks or separately copyrighted content are licensed
+under the application's license.
+
+Public comparison papers are separately licensed. Exact-file attribution,
+copyright, source/version, conversion notices and license links accompany the
+public library and relevant PDF/JSON reports. User uploads and held local papers
+are not granted redistribution rights by this application.

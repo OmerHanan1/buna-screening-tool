@@ -1,0 +1,28 @@
+.library-panel { background: var(--cp-surface); border: 1px solid var(--cp-border); border-radius: 16px; margin: 24px 0; padding: 24px; font-family: "Segoe UI", Aptos, Calibri, -apple-system, BlinkMacSystemFont, sans-serif; color: var(--cp-text); }
+.library-panel h2 { margin: 0; }
+.library-panel label { display: grid; gap: 8px; }
+.library-panel textarea, .library-panel input:not([type="checkbox"]) { width: 100%; box-sizing: border-box; padding: 12px; border: 1px solid var(--cp-border); border-radius: .625rem; background: var(--cp-bg-elevated); color: var(--cp-text); }
+.library-panel textarea { font-family: Consolas, "Courier New", Courier, monospace; resize: vertical; }
+.library-disclosure, .library-progress, .library-attach { background: var(--cp-surface-soft); border: 1px solid var(--cp-border); border-radius: .625rem; padding: 16px; }
+.library-progress { display: grid; gap: 8px; margin-top: 16px; }
+.library-progress progress { width: 100%; accent-color: var(--cp-accent); }
+.library-dois { max-height: 160px; overflow: auto; font-family: Consolas, "Courier New", Courier, monospace; }
+.library-toolbar, .library-pagination, .library-row-actions { display: flex; align-items: center; gap: 16px; margin: 16px 0; flex-wrap: wrap; }
+.library-toolbar label { flex: 1; min-width: 200px; }
+.library-papers { list-style: none; padding: 0; }
+.library-papers > li { padding: 16px 0; border-top: 1px solid var(--cp-border); overflow-wrap: anywhere; }
+.library-choice { display: flex !important; align-items: flex-start; gap: 12px !important; }
+.library-choice input { margin-top: 5px; accent-color: var(--cp-accent); }
+.library-panel small { display: block; color: var(--cp-text-muted); margin-top: 4px; }
+.library-panel .library-ready { color: var(--cp-success); }
+.library-panel details { margin-top: 16px; }
+.library-panel summary { cursor: pointer; }
+.library-panel .app-error { white-space: pre-wrap; }
+@media (max-width: 600px) { .library-panel { padding: 16px; } }
+.public-main { max-width: 960px; margin: 32px auto; padding: 0 24px; }
+.public-uploads { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 24px; margin: 24px 0; }
+.public-uploads label { display: grid; gap: 12px; padding: 20px; border: 1px solid var(--cp-border); background: var(--cp-surface); border-radius: 10px; }
+.public-paper { display: flex; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--cp-border); }
+.public-paper small { display: block; color: var(--cp-text-muted); }
+.public-consent { display: block; margin: 24px 0; }
+.public-main details { margin: 24px 0; }

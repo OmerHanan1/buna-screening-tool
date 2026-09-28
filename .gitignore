@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+.pytest_cache/
+*.egg-info/
+.buna-data/
+.buna-library-demo/
+.env
+frontend/node_modules/
+frontend/dist/
+frontend/*.tsbuildinfo
+test-results/
+public-corpus/
+public-dist/
+release-context/
+*.sqlite3
+*.sqlite3-*
+*.log

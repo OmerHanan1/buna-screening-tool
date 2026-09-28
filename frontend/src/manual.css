@@ -1,0 +1,64 @@
+.manual-app { max-width: 1040px; margin: auto; padding: 32px 24px 56px; }
+.manual-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 40px; }
+.manual-brand { font-size: 32px; font-weight: 750; letter-spacing: -1px; }
+.manual-brand span { color: var(--cp-accent); }
+.manual-app h1 { font-size: clamp(32px, 6vw, 48px); margin: 0 0 16px; }
+.manual-app h2 { margin: 0 0 12px; }
+.manual-app h3 { margin: 16px 0 8px; }
+.manual-intro { font-size: 18px; max-width: 720px; }
+.manual-privacy { padding: 16px 0; color: var(--cp-text-muted); }
+.manual-card, .manual-results { background: var(--cp-surface); border: 1px solid var(--cp-border); border-radius: 16px; padding: 24px; margin: 20px 0; }
+.manual-upload { display: block; margin-top: 16px; }
+.manual-upload input { display: block; margin-top: 8px; padding: 16px; border-style: dashed; }
+.manual-filename { font-size: 18px; font-weight: 600; overflow-wrap: anywhere; }
+.manual-muted, .manual-files small { color: var(--cp-text-muted); }
+.manual-files { padding: 0; list-style: none; }
+.manual-files li { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px 0; border-bottom: 1px solid var(--cp-border); }
+.manual-files li > div, .manual-files li > span { min-width: 0; overflow-wrap: anywhere; }
+.manual-files small, .manual-app td small { display: block; margin-top: 4px; }
+.manual-error { border: 1px solid var(--cp-danger); color: var(--cp-text); background: var(--cp-surface); border-radius: 10px; padding: 16px; margin: 16px 0; }
+.manual-error-text { color: var(--cp-danger); }
+.manual-compare { padding: 14px 28px; font-size: 17px; }
+.manual-app progress { width: 100%; accent-color: var(--cp-accent); }
+.manual-result-heading { display: flex; align-items: start; justify-content: space-between; gap: 16px; }
+.manual-scope { padding: 12px 0; font-weight: 600; }
+.manual-metrics { display: flex; flex-wrap: wrap; align-items: center; gap: 24px; padding: 24px 0; }
+.manual-metrics strong { display: block; font-size: 32px; color: var(--cp-accent); }
+.manual-metrics span { display: block; }
+.manual-metrics p { flex-basis: 100%; }
+.manual-table-wrap { overflow-x: auto; }
+.manual-app table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+.manual-app th, .manual-app td { text-align: left; vertical-align: top; border-bottom: 1px solid var(--cp-border); padding: 12px 8px; overflow-wrap: anywhere; }
+.manual-match { padding: 20px 0; border-bottom: 1px solid var(--cp-border); }
+.manual-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+.manual-pair > div { min-width: 0; }
+.manual-app blockquote { margin: 12px 0; background: var(--cp-surface-soft); border-left: 3px solid var(--cp-accent); padding: 16px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.manual-app mark { color: var(--cp-text); background: var(--cp-highlight); }
+.manual-context { color: var(--cp-text-muted); }
+.manual-original { white-space: pre-wrap; overflow-wrap: anywhere; }
+.manual-app sup { color: var(--cp-accent); font-size: 10px; }
+.manual-app pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.manual-details { margin: 24px 0; padding: 16px; border: 1px solid var(--cp-border); border-radius: 10px; }
+.manual-app summary { cursor: pointer; font-weight: 600; }
+.manual-app footer { margin-top: 32px; }
+@media (max-width: 650px) {
+  .manual-app { padding: 20px 16px; }
+  .manual-card, .manual-results { padding: 16px; }
+  .manual-pair { grid-template-columns: 1fr; }
+  .manual-result-heading { flex-direction: column; }
+  .manual-app .button { min-height: 44px; }
+}
+@media print {
+  @page { size: A4; margin: 14mm; }
+  body { font-size: 10pt; line-height: 1.35; }
+  .manual-app { padding: 0; max-width: none; }
+  .manual-app > :not(.manual-results) { display: none !important; }
+  .manual-results { margin: 0; padding: 0; border: none; }
+  .manual-results .button, .manual-results details, .manual-pagination button { display: none !important; }
+  .manual-pair { display: block; }
+  .manual-app h2 { font-size: 16pt; }
+  .manual-app h3 { font-size: 12pt; }
+  .manual-match { break-inside: auto; padding: 10px 0; }
+  .manual-app blockquote { padding: 8px; }
+  .manual-app tr { break-inside: avoid; }
+}
