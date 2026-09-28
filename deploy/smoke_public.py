@@ -21,7 +21,9 @@ def smoke(base: str):
         path = "/api/public/jobs/" + response.json()["id"]
         started = time.monotonic()
         while time.monotonic() - started < 270:
-            result = client.get(path, headers=first).json()
+            status_response = client.get(path, headers=first)
+            status_response.raise_for_status()
+            result = status_response.json()
             if result["status"] != "running":
                 break
             time.sleep(4)

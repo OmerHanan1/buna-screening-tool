@@ -47,7 +47,11 @@ resource application 'Microsoft.App/containerApps@2024-03-01' = {
         ]
         probes: [{
           type: 'Readiness'
-          httpGet: { path: '/health', port: 8080 }
+          httpGet: {
+            path: '/health'
+            port: 8080
+            httpHeaders: [{ name: 'Host', value: 'localhost' }]
+          }
           initialDelaySeconds: 10
           periodSeconds: 10
         }]
