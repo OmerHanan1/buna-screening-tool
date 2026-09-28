@@ -1,5 +1,8 @@
 **
 !pyproject.toml
+!LICENSE
+!NOTICE
+!README.public.md
 !buna
 !buna/*.py
 !frontend

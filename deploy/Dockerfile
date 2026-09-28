@@ -2,7 +2,12 @@ FROM python:3.13-slim-bookworm
 RUN apt-get update && apt-get install -y --no-install-recommends libseccomp2 \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
+ARG SOURCE_REVISION=unreleased
+LABEL org.opencontainers.image.source="https://github.com/OmerHanan1/buna-screening-tool" \
+      org.opencontainers.image.licenses="AGPL-3.0-or-later" \
+      org.opencontainers.image.revision=$SOURCE_REVISION
 COPY pyproject.toml /app/
+COPY LICENSE NOTICE README.public.md /app/
 COPY buna /app/buna
 COPY frontend/src/theme.css /app/frontend/src/theme.css
 COPY deploy/smoke_public.py /app/deploy/smoke_public.py

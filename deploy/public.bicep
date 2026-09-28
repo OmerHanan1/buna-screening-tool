@@ -9,6 +9,9 @@ param location string = resourceGroup().location
 param frontendOrigin string = 'https://omerhanan1.github.io'
 @description('Leave false until actual Azure worker isolation and synthetic workflow are verified.')
 param publicIngress bool = false
+@allowed([0, 1])
+@description('Use 1 only during bounded private runtime validation; restore 0 before release or when blocked.')
+param minimumReplicas int = 0
 
 resource environment 'Microsoft.App/managedEnvironments@2024-03-01' existing = {
   name: environmentName
@@ -50,7 +53,7 @@ resource application 'Microsoft.App/containerApps@2024-03-01' = {
         }]
       }]
       scale: {
-        minReplicas: 0
+        minReplicas: minimumReplicas
         maxReplicas: 1
         rules: [{ name: 'http', http: { metadata: { concurrentRequests: '10' } } }]
       }

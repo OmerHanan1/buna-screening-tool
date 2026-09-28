@@ -91,9 +91,12 @@ Keep revision mode Single, maximum one replica and all worker safeguards.
 4. Provision the dedicated registry/environment/application; configure budget alerts.
 5. Run `python deploy/smoke_public.py` inside the private app to validate ownership,
    all approved sources, real PDF output, credits and deletion.
-6. After approval, enable HTTPS public ingress. Set GitHub repository variable
-   `PUBLIC_API_URL` and enable Pages with GitHub Actions. The workflow builds the
-   `/buna-screening-tool/` frontend independently of local assets.
+6. After approval, enable HTTPS public ingress. Build with `VITE_PUBLIC_MODE=true`,
+   `VITE_PUBLIC_API_URL=https://YOUR_BACKEND` and
+   `VITE_BASE_PATH=/buna-screening-tool/`. Publish only the generated static output
+   on the same repository's `gh-pages` branch and configure Pages to serve that
+   branch. This requires ordinary repository publishing permission, not permission
+   to create Actions workflows. Keep local frontend assets separate.
 7. Repeat the smoke externally, then test the Pages browser flow.
 
 To stop spending, delete **only** the dedicated public resource group after
