@@ -66,3 +66,34 @@ compared inside the unchanged processing budget.
 Check active jobs before changing a live revision, preserve the local 44-source
 library and prior preferences, and leave Azure at minimum zero / maximum one
 replica. Budget notifications are not hard spending caps.
+
+## Runtime reliability
+
+Immutable corpus text is now extracted **once per private image build** and loaded
+lazily. Cache records pin original file SHA256, extraction SHA256, pypdf version,
+structure version and extraction profile; they never contain visitor uploads or
+other visitors' results. Build caches inside the same Linux dependency image as
+the deployed worker, using `python -m buna.corpus_cache`.
+
+The original 180-CPU-second aggregate cap was too small for realistic manuscripts
+plus reparsing 44 full sources. A 45-page, 12,684-word original synthetic manuscript
+reproduced the hosted failure near that cap. The bounded runtime now permits
+720 CPU seconds / 780 elapsed seconds, reserving report-generation time outside
+a 480-second comparison budget. Per-source 120-second and 64 MiB evidence limits
+remain. Hitting the comparison budget yields explicit partial/unchecked source
+coverage and retained evidence, not a false completed score. The engine's matching
+rules and score denominator are unchanged.
+
+Only safe diagnostic fields are retained with the job: stage, source counters,
+elapsed/CPU time, peak RSS, exit code and a fixed error code. No manuscript text,
+raw parser exceptions, source paths or tokens are logged. PDF-generation failure
+does not discard completed machine-readable evidence. The UI shows a reference
+code and the failed stage rather than guessing that the file was too large.
+Submitting the same visitor idempotency key returns the existing job instead of
+starting a duplicate heavy run after a lost response.
+
+One 1-vCPU/2-GiB worker remains the maximum concurrent comparison. Ten jobs per day
+at the full 780-second bound would be about 65 active hours/month while the quota
+store persists, within the documented 100-hour estimate. Quotas reset when the
+ephemeral service restarts, and traffic can still incur charges; budget alerts
+remain notifications rather than a hard spending cap.

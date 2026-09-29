@@ -11,11 +11,12 @@ COPY LICENSE NOTICE README.public.md /app/
 COPY buna /app/buna
 COPY frontend/src/theme.css /app/frontend/src/theme.css
 COPY deploy/smoke_public.py /app/deploy/smoke_public.py
+COPY deploy/benchmark_hosted.py /app/deploy/benchmark_hosted.py
 COPY release-context/wheels /wheels
 RUN pip install --no-index --find-links=/wheels setuptools wheel \
     && pip install --no-index --find-links=/wheels --no-build-isolation . \
     && rm -rf /wheels
-COPY release-context/hosted-corpus /corpus
+COPY release-context/hosted-corpus-runtime-v2 /corpus
 RUN chmod -R a-w /corpus && mkdir -p /runtime && chmod 711 /runtime
 ENV BUNA_PUBLIC_CORPUS=/corpus PYTHONUNBUFFERED=1
 EXPOSE 8080

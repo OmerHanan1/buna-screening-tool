@@ -17,10 +17,14 @@ Each job has its own unprivileged Linux UID, private files and a single-process
 worker. UIDs are not recycled during a replica's lifetime. Seccomp prevents network
 sockets, process creation/execution, namespace/session changes and privileged
 introspection. Every replica tests those denials before starting HTTP; unsupported
-kernels fail closed. The worker has 180 CPU seconds, 240 elapsed seconds, a 1.5 GiB
+kernels fail closed. The worker has 720 CPU seconds, 780 elapsed seconds, a 1.5 GiB
 address-space limit and bounded file/process counts. The gateway admits one job
 at a time and monitors temporary storage. Results are copied into gateway-owned
 storage using no-follow, regular-file and size checks.
+
+The comparison stage has its own 480-second bound so partial evidence can be
+rendered before the outer worker limits. Source extraction caches are immutable,
+content/parser-version pinned and shared only for the curated corpus.
 
 This reduces risk; it is not a promise that untrusted document parsing is perfectly
 safe. Do not submit confidential or sensitive manuscripts. Visitor files/results

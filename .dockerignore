@@ -11,10 +11,11 @@
 !deploy
 !deploy/Dockerfile
 !deploy/smoke_public.py
+!deploy/benchmark_hosted.py
 !release-context
 !release-context/wheels
 !release-context/wheels/*.whl
-!release-context/hosted-corpus
-!release-context/hosted-corpus/manifest.json
-!release-context/hosted-corpus/*.pdf
-!release-context/hosted-corpus/*.txt
+!release-context/hosted-corpus-runtime-v2
+!release-context/hosted-corpus-runtime-v2/*.json
+!release-context/hosted-corpus-runtime-v2/*.pdf
+!release-context/hosted-corpus-runtime-v2/*.txt

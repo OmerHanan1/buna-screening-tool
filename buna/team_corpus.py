@@ -80,6 +80,8 @@ def load_attested_corpus(root: Path, expected_manifest_sha: str):
             raise ValueError("Hosted corpus exceeds the 160 MiB input bound.")
         if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
             raise ValueError("Hosted corpus file fingerprint mismatch.")
+        from buna.corpus_cache import validate_cache
+        validate_cache(root, paper)
         for field in ("title", "attribution", "version", "license", "license_url", "source_url"):
             if not isinstance(paper.get(field), str) or not paper[field].strip():
                 raise ValueError("Hosted corpus provenance is incomplete.")

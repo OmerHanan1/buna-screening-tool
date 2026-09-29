@@ -384,7 +384,8 @@ def compare_documents(manuscript: dict, sources: list[dict],
                       source_done: Callable[[dict, list[dict]], None] | None = None,
                       load_checkpoint: Callable[[dict], dict | None] | None = None,
                       match_policy: dict | None = None,
-                      manuscript_scope: str = "abstract-onward") -> dict:
+                      manuscript_scope: str = "abstract-onward",
+                      total_time_limit_seconds: float | None = None) -> dict:
     """Return lexical evidence and a union-of-matched-word primary overlap score.
 
     Only aligned equal tokens count (including inside near-verbatim evidence).
@@ -392,6 +393,9 @@ def compare_documents(manuscript: dict, sources: list[dict],
     Quoted matches remain evidence. Citations and conventional phrasing are eligible.
     Retained evidence bounds the score: truncation produces an explicit warning.
     """
+    if total_time_limit_seconds is not None and not 0 < total_time_limit_seconds <= 600:
+        raise ValueError("Total comparison time limit must be positive and at most 600 seconds.")
+    total_deadline = time.monotonic() + total_time_limit_seconds if total_time_limit_seconds is not None else None
     warnings = list(manuscript.get("warnings", []))
 
     def check() -> None:
@@ -480,6 +484,15 @@ def compare_documents(manuscript: dict, sources: list[dict],
         if source.get("excluded"):
             source_coverage.append({"source_id": source_id, "status": "excluded-by-user", "reason": source.get("exclusion_reason") or "Excluded by user."})
             continue
+        if total_deadline is not None and time.monotonic() >= total_deadline:
+            truncated = True
+            row = {"source_id": source_id, "status": "skipped-time-limit",
+                   "reason": "The total comparison time budget ended before this source.",
+                   "limits_reached": ["total-time-limit"], "source_windows_visited": 0}
+            source_coverage.append(row)
+            if source_done:
+                source_done(row, [])
+            continue
         try:
             document = load_document(source) if load_document else source.get("document")
         except (OSError, ValueError) as exc:
@@ -544,7 +557,8 @@ def compare_documents(manuscript: dict, sources: list[dict],
                 candidates.update(index.get(shingle, ()))
             for window_id, _ in sorted(candidates.items(), key=lambda item: (-item[1], item[0])):
                 check()
-                if time.monotonic() - source_started >= MAX_SOURCE_SECONDS:
+                now = time.monotonic()
+                if now - source_started >= MAX_SOURCE_SECONDS or (total_deadline is not None and now >= total_deadline):
                     timed_out = True
                     break
                 comparisons += 1
@@ -584,7 +598,8 @@ def compare_documents(manuscript: dict, sources: list[dict],
                     anchor_cache[window_id] = _strong_anchors(mw, ms, me)
                 def check_anchor_budget():
                     check()
-                    if time.monotonic() - source_started >= MAX_SOURCE_SECONDS:
+                    now = time.monotonic()
+                    if now - source_started >= MAX_SOURCE_SECONDS or (total_deadline is not None and now >= total_deadline):
                         raise _SourceTimeLimit
                 try:
                     if match_policy:
@@ -698,11 +713,15 @@ def compare_documents(manuscript: dict, sources: list[dict],
                     f"Stopped after the declared {MAX_SOURCE_SECONDS}-second per-source time limit."
                     if timed_out else "Stopped at the declared 64 MiB estimated evidence-memory safety limit."
                 )
+                if timed_out and total_deadline is not None and time.monotonic() >= total_deadline:
+                    coverage["limits_reached"] = ["total-time-limit"]
+                    coverage["reason"] = "The total comparison time budget ended during this source; retained matches are partial."
                 break
 
         def check_consolidation_budget():
             check()
-            if time.monotonic() - source_started >= MAX_SOURCE_SECONDS:
+            now = time.monotonic()
+            if now - source_started >= MAX_SOURCE_SECONDS or (total_deadline is not None and now >= total_deadline):
                 raise _SourceTimeLimit
 
         source_quotes = _mask(st, _quotation_intervals(document["text"])[0])
@@ -722,6 +741,9 @@ def compare_documents(manuscript: dict, sources: list[dict],
                 f"The {MAX_SOURCE_SECONDS}-second per-source budget ended before evidence consolidation completed. "
                 "Original retained candidates remain available; some duplicate evidence may remain."
             )
+            if total_deadline is not None and time.monotonic() >= total_deadline:
+                coverage["limits_reached"] = ["total-time-limit"]
+                coverage["reason"] = "The total comparison budget ended before consolidation completed; retained evidence is partial."
         else:
             matches[initial_matches:] = merged
             evidence[initial_matches:] = [(match, {pair[0] for pair in match["aligned_pairs"]}) for match in merged]
@@ -789,6 +811,7 @@ def compare_documents(manuscript: dict, sources: list[dict],
                                               "minimum_exact_words": MIN_NEAR_WORDS, "minimum_weighted_similarity": NEAR_THRESHOLD,
                                               "maximum_ending_variants": 1, "minimum_ending_credit": ENDING_CREDIT_MINIMUM},
                      "source_time_limit_seconds": MAX_SOURCE_SECONDS, "estimated_evidence_memory_limit_mib": 64,
+                     "total_time_limit_seconds": total_time_limit_seconds,
                      "source_capacity_profile": "source-v1", "source_character_limit": SOURCE_MAX_CHARACTERS,
                      "candidate_limit": None, "comparison_count_limit": None, "finding_display_page_size": 10},
         "metrics": {"total_words": len(mt), "eligible_words": denominator,

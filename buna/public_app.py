@@ -18,7 +18,8 @@ import threading
 import time
 import re
 import hmac
-from uuid import uuid4
+import psutil
+from uuid import uuid4, UUID
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -29,6 +30,7 @@ from starlette.concurrency import run_in_threadpool
 
 from buna.public_corpus import load_corpus
 from buna.team_auth import TeamConfig, TeamAuthenticator
+from buna.hosted_runtime import WALL_SECONDS, ERRORS, read_artifact, safe_progress
 
 RETENTION = 3600
 BODY_LIMIT = 32 * 1024 * 1024
@@ -125,6 +127,8 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
         CREATE TABLE jobs(id TEXT PRIMARY KEY,owner TEXT NOT NULL,created REAL NOT NULL,status TEXT NOT NULL,uid INTEGER);
         CREATE TABLE submissions(created REAL NOT NULL,owner TEXT NOT NULL);
         CREATE TABLE identities(id INTEGER PRIMARY KEY AUTOINCREMENT);
+        CREATE TABLE diagnostics(job TEXT PRIMARY KEY,data TEXT NOT NULL);
+        CREATE TABLE request_keys(owner TEXT NOT NULL,key TEXT NOT NULL,job TEXT NOT NULL,PRIMARY KEY(owner,key));
         """)
     os.chmod(index, 0o600)
 
@@ -137,6 +141,8 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
                     if (results_root / row["id"]).exists():
                         shutil.rmtree(results_root / row["id"])
                     db.execute("DELETE FROM jobs WHERE id=?", (row["id"],))
+                    db.execute("DELETE FROM diagnostics WHERE job=?", (row["id"],))
+                    db.execute("DELETE FROM request_keys WHERE job=?", (row["id"],))
             db.execute("DELETE FROM sessions WHERE created<?", (time.time() - 4 * RETENTION,))
             db.execute("DELETE FROM submissions WHERE created<?", (time.time() - 86400,))
             now = time.time()
@@ -167,7 +173,7 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.add_middleware(PublicBodyLimit)
     app.add_middleware(CORSMiddleware, allow_origins=[origin] if origin else [],
-                       allow_methods=["GET", "POST", "DELETE"], allow_headers=["Authorization", "Content-Type"],
+                       allow_methods=["GET", "POST", "DELETE"], allow_headers=["Authorization", "Content-Type", "Idempotency-Key"],
                        expose_headers=["Content-Disposition"], allow_credentials=False)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=hosts)
 
@@ -237,7 +243,8 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
 
     @app.get("/health")
     def health():
-        return {"status": "ok", "mode": "email-gate" if email_gate else "team-restricted" if team_auth else "public-isolated", "engine": "2.5.3", "pdf_renderer": "5"}
+        return {"status": "ok", "mode": "email-gate" if email_gate else "team-restricted" if team_auth else "public-isolated",
+                "engine": "2.5.3", "pdf_renderer": "5", "runtime": "cached-corpus-v1"}
 
     @app.get("/api/auth/config")
     def auth_config():
@@ -276,6 +283,13 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
     def run_job(job_id, uid):
         folder = root / job_id
         status = "failed"
+        started = time.monotonic()
+        diagnostic = {"code": "worker-error", "stage": "starting"}
+        def save_diagnostic():
+            diagnostic.update(safe_progress(folder))
+            diagnostic["elapsed_seconds"] = round(time.monotonic() - started, 1)
+            with lock, connect() as db:
+                db.execute("INSERT OR REPLACE INTO diagnostics VALUES(?,?)", (job_id, json.dumps(diagnostic)))
         try:
             if worker_runner:
                 worker_runner(folder, uid)
@@ -287,17 +301,38 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
                                            start_new_session=True)
                 with lock:
                     active[job_id] = process
+                monitor = psutil.Process(process.pid)
                 try:
-                    deadline = time.monotonic() + 240
+                    deadline = time.monotonic() + WALL_SECONDS
+                    last_progress = 0
                     while process.poll() is None:
+                        try:
+                            cpu = monitor.cpu_times()
+                            diagnostic["cpu_seconds"] = round(cpu.user + cpu.system, 1)
+                            diagnostic["peak_rss_bytes"] = max(diagnostic.get("peak_rss_bytes", 0), monitor.memory_info().rss)
+                        except psutil.NoSuchProcess:
+                            pass
                         if time.monotonic() > deadline:
+                            diagnostic["code"] = "wall-limit"
                             raise RuntimeError("Worker time limit.")
                         size = sum(p.lstat().st_size for p in folder.rglob("*") if not p.is_symlink())
                         if size > 256 * 1024 * 1024:
+                            diagnostic["code"] = "storage-limit"
                             raise RuntimeError("Worker storage limit.")
+                        if time.monotonic() - last_progress >= 2:
+                            save_diagnostic()
+                            last_progress = time.monotonic()
                         time.sleep(.1)
                     code = process.returncode
+                    diagnostic["exit_code"] = code
                     if code:
+                        diagnostic["code"] = "worker-signal" if code < 0 else "worker-error"
+                        try:
+                            failure = json.loads(read_artifact(folder, "failure.json", 4096))
+                            if failure.get("code") in ERRORS:
+                                diagnostic["code"] = failure["code"]
+                        except (OSError, ValueError):
+                            pass
                         raise RuntimeError("Worker failed.")
                 finally:
                     # Kill descendants too, including a parser left behind after worker exit.
@@ -305,23 +340,13 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
                         os.killpg(process.pid, signal.SIGKILL)
                     except ProcessLookupError:
                         pass
-            def read_artifact(name, limit):
-                fd = os.open(folder / name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-                with os.fdopen(fd, "rb") as stream:
-                    info = os.fstat(stream.fileno())
-                    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > limit:
-                        raise RuntimeError("Invalid worker artifact.")
-                    data = stream.read(limit + 1)
-                if len(data) > limit:
-                    raise RuntimeError("Oversized worker artifact.")
-                return data
-            summary = json.loads(read_artifact("complete.json", 256 * 1024))
+            summary = json.loads(read_artifact(folder, "complete.json", 256 * 1024))
             if not isinstance(summary, dict):
                 raise RuntimeError("Invalid result metadata.")
             public_summary = {k: summary[k] for k in ("checked", "total", "overlap_percent", "partial",
                               "warnings", "algorithm_version", "score_available") if k in summary}
-            pdf = read_artifact("report.pdf", 64 * 1024 * 1024)
-            evidence = read_artifact("report.json", 64 * 1024 * 1024)
+            pdf = read_artifact(folder, "report.pdf", 64 * 1024 * 1024)
+            evidence = read_artifact(folder, "report.json", 64 * 1024 * 1024)
             if not pdf.startswith(b"%PDF-"):
                 raise RuntimeError("Invalid PDF artifact.")
             destination = results_root / job_id
@@ -332,20 +357,52 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
             status = "complete"
         except Exception:
             status = "failed"
+            try:
+                summary = json.loads(read_artifact(folder, "comparison-complete.json", 256 * 1024))
+                evidence = read_artifact(folder, "report.json", 64 * 1024 * 1024)
+                if not isinstance(summary, dict):
+                    raise ValueError("Invalid completed evidence metadata.")
+                destination = results_root / job_id
+                destination.mkdir(mode=0o700, exist_ok=True)
+                (destination / "complete.json").write_text(json.dumps({
+                    key: summary[key] for key in ("checked", "total", "overlap_percent", "partial", "warnings",
+                                                 "algorithm_version", "score_available") if key in summary
+                }))
+                (destination / "report.json").write_bytes(evidence)
+                diagnostic["code"] = "pdf-error"
+                status = "report-failed"
+            except (OSError, ValueError):
+                pass
         finally:
-            with lock, connect() as db:
-                db.execute("UPDATE jobs SET status=? WHERE id=? AND status='running'", (status, job_id))
-                active.pop(job_id, None)
-            gate.release()
+            try:
+                save_diagnostic()
+                with lock, connect() as db:
+                    db.execute("UPDATE jobs SET status=? WHERE id=? AND status='running'", (status, job_id))
+                    active.pop(job_id, None)
+            finally:
+                gate.release()
 
     @app.post("/api/public/jobs", status_code=202)
     async def submit(request: Request):
         owner = session(request)
+        request_key = request.headers.get("idempotency-key")
+        if request_key:
+            try:
+                request_key = str(UUID(request_key))
+            except ValueError:
+                raise HTTPException(422, "Invalid submission reference.") from None
+            with lock, connect() as db:
+                prior = db.execute("SELECT j.id,j.status FROM request_keys r JOIN jobs j ON j.id=r.job "
+                                   "WHERE r.owner=? AND r.key=? AND j.created>=?",
+                                   (owner, request_key, time.time() - RETENTION)).fetchone()
+            if prior:
+                return {"id": prior["id"], "status": prior["status"]}
         if not gate.acquire(blocking=False):
             raise HTTPException(429, "A comparison is running. Please try again shortly.")
         job_id = str(uuid4())
         folder = root / job_id
         accepted = False
+        created_at = None
         try:
             cleanup()
             with lock, connect() as db:
@@ -389,9 +446,15 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
                 sources = []
                 for digest in selected:
                     paper = approved[digest]
-                    name = "curated-" + paper["filename"]
-                    shutil.copyfile(corpus_root / paper["filename"], folder / name)
-                    sources.append({"path": name, "title": paper["title"]})
+                    cache = paper.get("parsed_cache")
+                    if cache:
+                        sources.append({"path": str(corpus_root / paper["filename"]), "title": paper["title"],
+                                        "cached_document": str(corpus_root / cache["filename"]),
+                                        "cached_sha256": cache["sha256"]})
+                    else:
+                        name = "curated-" + paper["filename"]
+                        shutil.copyfile(corpus_root / paper["filename"], folder / name)
+                        sources.append({"path": name, "title": paper["title"]})
                 manual = form.getlist("sources")
                 if len(manual) > 5:
                     raise HTTPException(422, "At most five personal comparison files.")
@@ -413,17 +476,30 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
                     os.chown(path, uid, uid)
                     os.chmod(path, 0o600)
             with lock, connect() as db:
-                db.execute("INSERT INTO jobs VALUES(?,?,?,?,?)", (job_id, owner, time.time(), "running", uid))
-                db.execute("INSERT INTO submissions VALUES(?,?)", (time.time(), owner))
+                created_at = time.time()
+                db.execute("INSERT INTO jobs VALUES(?,?,?,?,?)", (job_id, owner, created_at, "running", uid))
+                db.execute("INSERT INTO submissions VALUES(?,?)", (created_at, owner))
+                if request_key:
+                    db.execute("INSERT INTO request_keys VALUES(?,?,?)", (owner, request_key, job_id))
                 active[job_id] = None
             thread = threading.Thread(target=run_job, args=(job_id, uid), daemon=True)
-            thread.start()
+            try:
+                thread.start()
+            except RuntimeError as exc:
+                raise HTTPException(503, "The worker could not start. No comparison was submitted; retry shortly.") from exc
             accepted = True
             return {"id": job_id, "status": "running"}
         except (json.JSONDecodeError, TypeError) as exc:
             raise HTTPException(422, "Invalid upload fields.") from exc
         finally:
             if not accepted:
+                with lock, connect() as db:
+                    active.pop(job_id, None)
+                    db.execute("DELETE FROM request_keys WHERE job=?", (job_id,))
+                    db.execute("DELETE FROM diagnostics WHERE job=?", (job_id,))
+                    db.execute("DELETE FROM jobs WHERE id=?", (job_id,))
+                    if created_at is not None:
+                        db.execute("DELETE FROM submissions WHERE owner=? AND created=?", (owner, created_at))
                 if folder.exists():
                     shutil.rmtree(folder)
                 gate.release()
@@ -432,10 +508,18 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
     def status(job_id: str, request: Request):
         row = owned(job_id, session(request))
         value = {"id": job_id, "status": row["status"]}
-        if row["status"] == "complete":
+        if row["status"] in {"complete", "report-failed"}:
             value.update(json.loads((results_root / job_id / "complete.json").read_text()))
-        elif row["status"] == "failed":
-            value["error"] = "Comparison could not finish within safe limits, or a document could not be parsed. Try smaller text-based files."
+        with connect() as db:
+            entry = db.execute("SELECT data FROM diagnostics WHERE job=?", (job_id,)).fetchone()
+        diagnostic = json.loads(entry[0]) if entry else {}
+        value["progress"] = {key: diagnostic[key] for key in ("stage", "source_index", "source_count",
+                             "processed_sources", "checked_sources", "source_windows_visited",
+                             "source_windows_total", "elapsed_seconds") if key in diagnostic}
+        if row["status"] in {"failed", "report-failed"}:
+            code = diagnostic.get("code", "worker-error")
+            value.update(error=ERRORS.get(code, ERRORS["worker-error"]), error_code=code,
+                         diagnostic_id=job_id, evidence_available=row["status"] == "report-failed")
         return value
 
     @app.get("/api/public/jobs/{job_id}/report.{format}")
@@ -443,7 +527,7 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
         row = owned(job_id, session(request))
         if format not in {"pdf", "json"}:
             raise HTTPException(404)
-        if row["status"] != "complete":
+        if row["status"] != "complete" and not (format == "json" and row["status"] == "report-failed"):
             raise HTTPException(409, "Report is not ready.")
         return FileResponse(results_root / job_id / f"report.{format}", filename=f"paper-overlap-report.{format}",
                             media_type="application/pdf" if format == "pdf" else "application/json")
@@ -468,6 +552,8 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
                 shutil.rmtree(results_root / job_id)
             with connect() as db:
                 db.execute("DELETE FROM jobs WHERE id=?", (job_id,))
+                db.execute("DELETE FROM diagnostics WHERE job=?", (job_id,))
+                db.execute("DELETE FROM request_keys WHERE job=?", (job_id,))
         return {"status": "deleted"}
 
     return app
