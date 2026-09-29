@@ -55,7 +55,7 @@ describe("API requests", () => {
 
 describe("initial Clawpilot theme", () => {
   const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
-  const script = html.match(/<script>([\s\S]*?)<\/script>/)?.[1] || "";
+  const script = readFileSync(new URL("../public/theme-init.js", import.meta.url), "utf8");
   function theme(search: string, prefersDark: boolean) {
     const setAttribute = vi.fn();
     runInNewContext(script, {
@@ -65,6 +65,11 @@ describe("initial Clawpilot theme", () => {
     });
     return setAttribute.mock.calls[0]?.[1];
   }
+  it("loads the theme before the app without requiring inline scripts", () => {
+    expect(html).toContain('<script src="%BASE_URL%theme-init.js"></script>');
+    expect(html.indexOf("theme-init.js")).toBeLessThan(html.indexOf("/src/main.tsx"));
+    expect(html).not.toMatch(/<script>/);
+  });
   it("honors explicit light even when the operating system uses dark", () => {
     expect(theme("?clawpilotTheme=light", true)).toBe("light");
   });

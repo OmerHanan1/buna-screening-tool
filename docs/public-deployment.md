@@ -7,10 +7,10 @@ The local application and its data are never mounted into the public service.
 
 ## Isolation and retention
 
-The gateway issues 256-bit anonymous bearer capabilities stored in the browser's
-session storage. All job/status/download/delete routes enforce ownership. No global
+The email-gated gateway issues 256-bit visitor bearer capabilities kept only in
+page memory. All job/status/download/delete routes enforce ownership. No global
 job listing or curation API is exposed. The corpus is immutable and separate.
-Use the exact HTTPS Pages origin in `BUNA_PUBLIC_ORIGIN`; cross-origin credentials
+Use the exact HTTPS frontend origin in `BUNA_PUBLIC_ORIGIN`; cross-origin credentials
 and wildcard origins are not used.
 
 Each job has its own unprivileged Linux UID, private files and a single-process
@@ -40,6 +40,10 @@ restarts. Rate/quotas and one replica reduce abuse but are **not a billing cap**
 No external DOI, AI or discovery requests occur in the public worker.
 
 ## Reviewed corpus
+
+The current 44-document private hosted corpus follows the user-attested permission
+policy in [email-gate.md](email-gate.md), not a public redistribution license.
+The following seed procedure applies only to separately reviewed public corpora.
 
 `python -m buna.public_seed --audit REVIEWED_JSON --expected-sha256 REVIEW_SHA
 --staging VERIFIED_FILES --destination release-context/public-corpus`
@@ -79,6 +83,18 @@ Images are built locally; no paid ACR build is required. Scale-to-zero consumes 
 compute, but sustained traffic can exceed the estimate. Budget notifications at
 $20/$25 are alerts, not enforcement. Ask before increasing the approved baseline.
 
+The frontend uses **Azure Static Web Apps Free** (`paper-overlap-web`, East US 2)
+at **https://kind-field-035b3910f.4.azurestaticapps.net/**, in the same dedicated
+resource group. It adds $0 hosting cost within the Free quotas: 100 GB monthly
+bandwidth per subscription, 250 MB per environment, 500 MB total storage per app,
+and 15,000 files. Free has no SLA or paid bandwidth overage; quota exhaustion can
+affect availability. No custom domain, Functions, linked backend, or Front Door
+is needed. The browser calls the existing Container App directly; integrated
+Container Apps backend linking would require paid Standard and must not be enabled.
+See [plans](https://learn.microsoft.com/azure/static-web-apps/plans),
+[quotas](https://learn.microsoft.com/azure/static-web-apps/quotas), and
+[backend integration](https://learn.microsoft.com/azure/static-web-apps/apis-container-apps).
+
 `deploy/public.bicep` defaults to **internal ingress**. Deploy that first and verify
 the actual Azure amd64 kernel and complete synthetic upload-to-PDF workflow.
 Only after the security and corpus gates pass should `publicIngress` become true.
@@ -95,16 +111,89 @@ Keep revision mode Single, maximum one replica and all worker safeguards.
 4. Provision the dedicated registry/environment/application; configure budget alerts.
 5. Run `python deploy/smoke_public.py` inside the private app to validate ownership,
    all approved sources, real PDF output, credits and deletion.
-6. After approval, enable HTTPS public ingress. Build with `VITE_PUBLIC_MODE=true`,
-   `VITE_PUBLIC_API_URL=https://YOUR_BACKEND` and
-   `VITE_BASE_PATH=/buna-screening-tool/`. Publish only the generated static output
-   on the same repository's `gh-pages` branch and configure Pages to serve that
-   branch. This requires ordinary repository publishing permission, not permission
-   to create Actions workflows. Keep local frontend assets separate.
-7. Repeat the smoke externally, then test the Pages browser flow.
+6. After approval, enable HTTPS public ingress. Build and deploy only the frontend
+   as described below. Keep local frontend assets separate.
+7. Repeat the smoke externally, then test the Azure browser flow.
+
+### Static frontend release
+
+Use a reviewed source commit matching the API. From the repository root:
+
+```sh
+npm --prefix frontend ci
+VITE_PUBLIC_MODE=true VITE_EMAIL_GATE=true VITE_BASE_PATH=/ \
+VITE_PUBLIC_API_URL=https://paper-overlap-api.purpleflower-beedf5ce.eastus.azurecontainerapps.io \
+npm --prefix frontend run build -- --outDir ../public-dist --emptyOutDir
+cp LICENSE NOTICE public-dist/
+```
+
+`public-dist` must contain only `index.html`, `theme-init.js`,
+`staticwebapp.config.json`, `LICENSE`, `NOTICE`, and hashed JS/CSS under `assets/`.
+Inspect the complete file list and size before uploading. Never upload the
+repository root, private corpus, extraction caches, release context, visitor data,
+or container image. The source-code link and license/notice files must remain.
+
+`frontend/public/staticwebapp.config.json` sets security headers, immutable caching
+for hashed assets, and a SPA fallback excluding API/assets and missing file paths.
+The synchronous external theme script avoids requiring inline script execution or
+`unsafe-eval`. `connect-src` permits only the existing HTTPS API. Test native
+blob-URL PDF tabs/downloads whenever changing CSP; do not weaken API headers.
+
+Deploy with the supported SWA CLI, independently of GitHub Actions:
+
+```sh
+npm exec --yes --package @azure/static-web-apps-cli@2.0.10 -- swa deploy public-dist \
+  --env production --subscription-id d7d06293-4bf0-48fd-9ae5-11bbe4566248 \
+  --resource-group rg-paper-overlap-public --app-name paper-overlap-web \
+  --no-use-keychain
+```
+
+Pass the deployment token privately through `SWA_CLI_DEPLOYMENT_TOKEN`, obtained
+from the same explicitly scoped SWA resource. Never print it, place it in source,
+pass it as a command-line argument, or use a `VITE_*` variable for any secret.
+No GitHub workflow permission or Microsoft sign-in callback change is required.
+
+### Origin cutover and rollback
+
+Only one operator may deploy/update the backend at a time. Wait for running jobs
+to finish and allow reports to be downloaded before changing the live revision.
+First upload and verify static assets, then set `BUNA_PUBLIC_ORIGIN` to exactly
+`https://kind-field-035b3910f.4.azurestaticapps.net` (no path or trailing slash).
+Keep `BUNA_PUBLIC_HOSTS` restricted to API hosts, not the frontend hostname.
+The single origin controls both CORS and the explicit Origin rejection middleware.
+Keep credentials disabled, preserve the email gate and capability ownership, and
+never use wildcard CORS. The existing Microsoft registration stays unused.
+
+The frontend shell is static, but entry readiness still waits for the scale-to-zero
+API to wake up. Connection failures must show a retry action. New hosts/revisions
+do not migrate in-memory visitor capabilities or temporary jobs.
+
+Run frontend unit and hosted browser checks, then the opt-in actual flow with an
+authorized email supplied privately through `HOSTED_TEST_EMAIL`:
+
+```sh
+cd frontend
+npm test
+npx playwright test --config playwright.hosted.config.ts --grep-invert 'opt-in actual'
+HOSTED_REALISTIC=true npx playwright test --config playwright.hosted.config.ts \
+  --grep 'opt-in actual'
+```
+
+The live check generates an original 45-page synthetic PDF using the repository
+`.venv` PyMuPDF dependency. It compares the 44 defaults plus one synthetic source,
+checks deselection persistence, visitor isolation, origin/source-route denials,
+real PDF opening/download, desktop/mobile layout, and deletion. It never needs
+a real user manuscript. `HOSTED_SITE_URL` overrides the target URL when needed.
+
+Keep old Pages unchanged until the new live flow passes. Afterwards, its
+`gh-pages` branch can serve a moved notice linking to the Azure site (normal
+fast-forward commit, never force-push). Old Pages is no longer an allowed API
+origin. Rollback requires restoring the previous frontend artifact and exact
+Pages origin in a coordinated backend update; it cannot restore ephemeral jobs.
 
 To stop spending, delete **only** the dedicated public resource group after
 confirming its identity; this removes the public app, registry and identity.
-Disable the Pages workflow/site separately. No local data should be affected.
+The group also contains the Free static frontend; disable the legacy Pages
+notice/site separately. No local data should be affected.
 Do not weaken isolation when a runtime check fails—keep ingress private and fix
 the deployment or report the blocker.

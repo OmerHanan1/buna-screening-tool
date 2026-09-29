@@ -3,12 +3,27 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 
-const site = "https://omerhanan1.github.io/buna-screening-tool/";
+const site = process.env.HOSTED_SITE_URL || "https://kind-field-035b3910f.4.azurestaticapps.net/";
 const backend = "https://paper-overlap-api.purpleflower-beedf5ce.eastus.azurecontainerapps.io";
+const sitePath = new URL(site).pathname;
+const staticConfig = JSON.parse(await fs.readFile("public/staticwebapp.config.json", "utf8"));
+
+async function staticResponse(url: string) {
+  const pathname = new URL(url).pathname;
+  expect(pathname.startsWith(sitePath)).toBe(true);
+  const name = pathname.slice(sitePath.length) || "index.html";
+  const filename = path.resolve("../public-dist", name);
+  expect(filename.startsWith(path.resolve("../public-dist") + path.sep)).toBe(true);
+  return {
+    body: await fs.readFile(filename),
+    contentType: name.endsWith(".js") ? "text/javascript" : name.endsWith(".css") ? "text/css" : "text/html",
+    headers: staticConfig.globalHeaders,
+  };
+}
 
 test("opt-in actual hosted PDF workflow", async ({ page }) => {
   test.skip(!process.env.HOSTED_TEST_EMAIL, "Requires explicit authorized live-test email.");
-  test.setTimeout(360_000);
+  test.setTimeout(1_020_000);
   page.setDefaultTimeout(90_000);
   await page.goto(site, { waitUntil: "domcontentloaded" });
   await page.getByLabel("Email address").fill("wrong@example.invalid");
@@ -23,6 +38,11 @@ test("opt-in actual hosted PDF workflow", async ({ page }) => {
   await page.locator(".hosted-source-item input").first().uncheck();
   await page.keyboard.press("Escape");
   await expect(page.getByRole("heading", { name: "43 papers selected", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Review papers", exact: true }).click();
+  await expect(page.locator(".hosted-source-item input").first()).not.toBeChecked();
+  await page.locator(".hosted-source-item input").first().check();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("heading", { name: "44 papers selected", exact: true })).toBeVisible();
   const sentence = "The ceramic sensor records a stable sequence of local measurements during every carefully controlled laboratory cycle.";
   const pdf = (title: string) => {
     const result = spawnSync("../.venv/bin/python", ["-c",
@@ -30,17 +50,50 @@ test("opt-in actual hosted PDF workflow", async ({ page }) => {
       title, sentence]);
     expect(result.status).toBe(0); return result.stdout;
   };
-  await page.getByLabel("Your paper", { exact: true }).setInputFiles({ name: "Synthetic manuscript.pdf", mimeType: "application/pdf", buffer: pdf("Synthetic manuscript") });
+  const realistic = process.env.HOSTED_REALISTIC === "true";
+  let target = pdf("Synthetic manuscript");
+  if (realistic) {
+    const result = spawnSync("../.venv/bin/python", ["-c",
+      "import sys,tempfile;from pathlib import Path;sys.path.insert(0,'../deploy');from benchmark_hosted import manuscript\nwith tempfile.TemporaryDirectory() as d:\n p=Path(d)/'synthetic.pdf';manuscript(p);sys.stdout.buffer.write(p.read_bytes())"]);
+    expect(result.status).toBe(0);
+    target = result.stdout;
+  }
+  await page.getByLabel("Your paper", { exact: true }).setInputFiles({ name: "Synthetic manuscript.pdf", mimeType: "application/pdf", buffer: target });
   await expect(page.getByText("Ready to upload", { exact: true })).toBeVisible();
   await page.getByLabel("Additional comparison papers").setInputFiles({ name: "Synthetic source.pdf", mimeType: "application/pdf", buffer: pdf("Synthetic source") });
   await expect(page.getByRole("button", { name: "Remove comparison Synthetic source.pdf" })).toBeVisible();
   await page.getByRole("checkbox", { name: /authorized to upload/ }).check();
   await page.screenshot({ path: test.info().outputPath("live-files-selected.png"), fullPage: true });
+  const creation = page.waitForResponse(response =>
+    response.url() === backend + "/api/public/jobs" && response.request().method() === "POST");
   await page.getByRole("button", { name: "Compare papers", exact: true }).click();
+  const created = await creation;
+  expect(created.status()).toBe(202);
+  const jobId = (await created.json()).id;
+  const secondSession = await page.request.post(backend + "/api/public/session", {
+    headers: { Origin: new URL(site).origin }, data: { email: process.env.HOSTED_TEST_EMAIL },
+  });
+  expect(secondSession.status()).toBe(200);
+  const secondHeaders = {
+    Origin: new URL(site).origin, Authorization: `Bearer ${(await secondSession.json()).token}`,
+  };
+  for (const suffix of ["", "/report.pdf", "/report.json"]) {
+    expect((await page.request.get(`${backend}/api/public/jobs/${jobId}${suffix}`, { headers: secondHeaders })).status()).toBe(404);
+  }
+  expect((await page.request.delete(`${backend}/api/public/jobs/${jobId}`, { headers: secondHeaders })).status()).toBe(404);
+  for (const route of ["/api/public/sources", "/api/admin", "/corpus/manifest.json"]) {
+    expect((await page.request.get(backend + route, { headers: secondHeaders })).status()).toBe(404);
+  }
+  expect((await page.request.get(backend + "/api/public/library", {
+    headers: { Origin: new URL(site).origin },
+  })).status()).toBe(401);
+  for (const origin of ["https://omerhanan1.github.io", "https://untrusted.example.invalid"]) {
+    expect((await page.request.get(backend + "/api/auth/config", { headers: { Origin: origin } })).status()).toBe(403);
+  }
   await expect(page.getByRole("heading", { name: "Comparing your manuscript", exact: true })).toBeVisible({ timeout: 90_000 });
   await page.screenshot({ path: test.info().outputPath("live-progress.png"), fullPage: true });
-  await expect(page.getByRole("heading", { name: "Comparison report", exact: true })).toBeVisible({ timeout: 240_000 });
-  await expect(page.getByText("44 / 44", { exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Comparison report", exact: true })).toBeVisible({ timeout: 840_000 });
+  await expect(page.getByText("45 / 45", { exact: true })).toBeVisible();
   await page.screenshot({ path: test.info().outputPath("live-result-desktop.png"), fullPage: true });
   const popupWait = page.waitForEvent("popup");
   await page.getByRole("button", { name: "Open PDF", exact: true }).click();
@@ -64,9 +117,34 @@ test("opt-in actual hosted PDF workflow", async ({ page }) => {
   await page.getByRole("button", { name: "Delete report", exact: true }).click();
   await expect(page.getByRole("heading", { name: "New comparison", exact: true })).toBeVisible();
   await fs.writeFile(test.info().outputPath("live-proof.json"), JSON.stringify({
-    url: site, default_sources: 44, optout_retained: 43, synthetic_manual_sources: 1,
-    fully_checked: 44, pdf_bytes: bytes.length, open_pdf_blob: true, deleted: true,
+    url: site, default_sources: 44, optout_retained: 43, restored_sources: 44, synthetic_manual_sources: 1,
+    realistic_manuscript_pages: realistic ? 45 : 1,
+    fully_checked: 45, pdf_bytes: bytes.length, open_pdf_blob: true, deleted: true,
+    independent_same_email_visitor_denied: true, source_admin_routes_denied: true,
+    old_and_unknown_origins_denied: true, unauthenticated_library_denied: true,
   }, null, 2));
+});
+
+test("cold-start readiness and connection retry stay explicit", async ({ page }) => {
+  let ready = false;
+  let finishConnection: () => void = () => {};
+  const connection = new Promise<void>(resolve => { finishConnection = resolve; });
+  await page.route(site + "**", async route => route.fulfill(await staticResponse(route.request().url())));
+  await page.route(backend + "/api/auth/config", async route => {
+    await connection;
+    await route.fulfill(ready ? { json: { mode: "email-gate" } } : { status: 503, json: { detail: "Starting." } });
+  });
+  await page.goto(site, { waitUntil: "domcontentloaded" });
+  await page.getByLabel("Email address").fill("allowed@example.org");
+  await expect(page.getByRole("button", { name: "Continue", exact: true })).toBeDisabled();
+  await expect(page.getByRole("status")).toContainText("First access may take a moment");
+  finishConnection();
+  await expect(page.getByRole("alert")).toContainText("service could not be reached");
+  await expect(page.getByRole("button", { name: "Continue", exact: true })).toBeDisabled();
+  ready = true;
+  await page.getByRole("button", { name: "Retry connection", exact: true }).click();
+  await page.getByLabel("Email address").fill("allowed@example.org");
+  await expect(page.getByRole("button", { name: "Continue", exact: true })).toBeEnabled();
 });
 const papers = Array.from({ length: 44 }, (_, i) => ({
   sha256: i.toString(16).padStart(64, "0"),
@@ -92,10 +170,7 @@ for (const variant of [
     await page.setViewportSize(variant);
     let complete = false, submitted = false;
     await page.route(site + "**", async route => {
-      const name = new URL(route.request().url()).pathname.replace("/buna-screening-tool/", "") || "index.html";
-      const filename = path.resolve("../public-dist", name);
-      expect(filename.startsWith(path.resolve("../public-dist") + path.sep)).toBe(true);
-      await route.fulfill({ body: await fs.readFile(filename), contentType: name.endsWith(".js") ? "text/javascript" : name.endsWith(".css") ? "text/css" : "text/html" });
+      await route.fulfill(await staticResponse(route.request().url()));
     });
     await page.route(backend + "/**", async route => {
       const url = new URL(route.request().url()), method = route.request().method();
@@ -166,8 +241,7 @@ for (const variant of [
 test("expired sessions and partial/no-score results stay explicit", async ({ page }) => {
   let expired = false, complete = false;
   await page.route(site + "**", async route => {
-    const name = new URL(route.request().url()).pathname.replace("/buna-screening-tool/", "") || "index.html";
-    await route.fulfill({ body: await fs.readFile(path.resolve("../public-dist", name)), contentType: name.endsWith(".js") ? "text/javascript" : name.endsWith(".css") ? "text/css" : "text/html" });
+    await route.fulfill(await staticResponse(route.request().url()));
   });
   await page.route(backend + "/**", async route => {
     const url = new URL(route.request().url());

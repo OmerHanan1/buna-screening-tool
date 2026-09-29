@@ -4,6 +4,7 @@ A scientific-paper **text-overlap screening tool for human review**, not a
 plagiarism verdict or a reproduction of Crossref/Turnitin's proprietary service.
 
 The hosted site uses a **simple email allowlist gate**, as explicitly requested.
+Open it at **https://kind-field-035b3910f.4.azurestaticapps.net/**.
 Email ownership is not verified: anyone who knows an allowed email can enter.
 The backend checks the entry and issues a separate random visitor capability;
 typing the same email does not grant access to another visitor's jobs or reports.
@@ -12,7 +13,7 @@ See [`docs/email-gate.md`](docs/email-gate.md).
 All 44 verified source documents are available for server-side comparison on the
 user's explicit hosted-use authorization. This is **not** a claim that all files
 are cleared for public redistribution. Originals remain in private backend
-storage, never in GitHub Pages assets or source-file download routes.
+storage, never in public frontend assets or source-file download routes.
 
 The hosted service uses a reviewed paper library and optional
 personal comparison uploads. It produces real PDFs with original manuscript
@@ -39,7 +40,7 @@ validation, incomplete results and expired-session errors remain visible.
 * `buna/public_app.py`: isolated anonymous public API; it never serves the local store.
 * `buna/public_worker.py`: per-job Linux isolation and comparison/PDF generation.
 * `buna/public_seed.py`: explicit reviewed-hash corpus build, separate from private data.
-* `frontend/src/PublicApp.tsx`: public frontend; deployed separately on GitHub Pages.
+* `frontend/src/PublicApp.tsx`: public frontend; deployed separately on Azure Static Web Apps Free.
 * [`docs/public-deployment.md`](docs/public-deployment.md): boundaries, budgets,
   operation, retention, build and deployment instructions.
 
