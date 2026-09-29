@@ -15,7 +15,7 @@ COPY release-context/wheels /wheels
 RUN pip install --no-index --find-links=/wheels setuptools wheel \
     && pip install --no-index --find-links=/wheels --no-build-isolation . \
     && rm -rf /wheels
-COPY release-context/public-corpus /corpus
+COPY release-context/hosted-corpus /corpus
 RUN chmod -R a-w /corpus && mkdir -p /runtime && chmod 711 /runtime
 ENV BUNA_PUBLIC_CORPUS=/corpus PYTHONUNBUFFERED=1
 EXPOSE 8080

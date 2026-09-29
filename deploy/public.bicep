@@ -16,6 +16,11 @@ param minimumReplicas int = 0
 param teamTenantId string = ''
 param teamClientId string = ''
 param teamOwnerObjectId string = ''
+@allowed(['', 'anonymous', 'team', 'email-gate'])
+param accessMode string = ''
+@secure()
+param allowedEmail string = ''
+param attestedCorpusSha string = ''
 
 resource environment 'Microsoft.App/managedEnvironments@2024-03-01' existing = {
   name: environmentName
@@ -32,6 +37,7 @@ resource application 'Microsoft.App/containerApps@2024-03-01' = {
     managedEnvironmentId: environment.id
     configuration: {
       activeRevisionsMode: 'Single'
+      secrets: empty(allowedEmail) ? [] : [{ name: 'allowed-email', value: allowedEmail }]
       registries: [{ server: registryServer, identity: pullIdentityId }]
       ingress: {
         external: publicIngress
@@ -51,6 +57,12 @@ resource application 'Microsoft.App/containerApps@2024-03-01' = {
           { name: 'BUNA_TEAM_TENANT', value: teamTenantId }
           { name: 'BUNA_TEAM_CLIENT', value: teamClientId }
           { name: 'BUNA_TEAM_OWNER_OID', value: teamOwnerObjectId }
+          { name: 'BUNA_ACCESS_MODE', value: accessMode }
+          { name: 'BUNA_ATTESTED_CORPUS_SHA', value: attestedCorpusSha }
+          {
+            name: 'BUNA_ALLOWED_EMAIL'
+            ...(!empty(allowedEmail) ? { secretRef: 'allowed-email' } : { value: '' })
+          }
         ]
         probes: [{
           type: 'Readiness'

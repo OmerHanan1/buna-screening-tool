@@ -3,11 +3,16 @@
 A scientific-paper **text-overlap screening tool for human review**, not a
 plagiarism verdict or a reproduction of Crossref/Turnitin's proprietary service.
 
-The hosted site now requires the **explicitly approved owner's Microsoft sign-in**.
-The static login page is public; library, uploads, comparisons and reports are
-authorized by the backend. See [`docs/team-deployment.md`](docs/team-deployment.md).
-Sign-in does not expand paper-use rights: the initial protected release retains
-12 reviewed sources, not all files in the separate local library.
+The hosted site uses a **simple email allowlist gate**, as explicitly requested.
+Email ownership is not verified: anyone who knows an allowed email can enter.
+The backend checks the entry and issues a separate random visitor capability;
+typing the same email does not grant access to another visitor's jobs or reports.
+See [`docs/email-gate.md`](docs/email-gate.md).
+
+All 44 verified source documents are available for server-side comparison on the
+user's explicit hosted-use authorization. This is **not** a claim that all files
+are cleared for public redistribution. Originals remain in private backend
+storage, never in GitHub Pages assets or source-file download routes.
 
 The hosted service uses a reviewed paper library and optional
 personal comparison uploads. It produces real PDFs with original manuscript
@@ -15,7 +20,7 @@ pages, source-numbered highlights and source-passage comments, plus JSON evidenc
 New comparisons begin at a recognized Abstract heading; otherwise a visible
 warning explains the whole-manuscript fallback.
 
-Hosted uploads are isolated by validated Microsoft identity, expire within one
+Hosted uploads are isolated by independent random visitor capabilities, expire within one
 hour, and can disappear sooner on restart/scale-down. Download results promptly.
 Do not upload sensitive or confidential manuscripts. This preview does **not**
 offer DOI import, a persistent visitor library or permanent comparison history.
@@ -41,8 +46,8 @@ cd frontend && npm ci && npm test && cd ..
 ```
 
 The local single-user app can be started with `.venv/bin/python -m buna`.
-Do not expose that local API to the internet. The public service requires its
-Linux container, a reviewed public corpus and an exact HTTPS frontend origin.
+Do not expose that local API to the internet. The hosted service requires its Linux container, an exact-hash reviewed corpus
+permission manifest and an exact HTTPS frontend origin.
 
 ## Licensing
 

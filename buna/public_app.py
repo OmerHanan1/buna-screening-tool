@@ -16,11 +16,14 @@ import sys
 import tempfile
 import threading
 import time
+import re
+import hmac
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
+from pydantic import BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.concurrency import run_in_threadpool
 
@@ -31,6 +34,10 @@ RETENTION = 3600
 BODY_LIMIT = 32 * 1024 * 1024
 MAX_JOBS = 10
 MAX_DISK = 768 * 1024 * 1024
+
+
+class EmailGateInput(BaseModel):
+    email: str = Field(max_length=254)
 
 
 class PublicBodyLimit:
@@ -61,11 +68,28 @@ class PublicBodyLimit:
 def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None = None,
                       *, worker_runner=None, team_authenticator=None) -> FastAPI:
     corpus_root = (corpus_root or Path(os.environ["BUNA_PUBLIC_CORPUS"])).resolve()
-    team_config = TeamConfig.from_environment()
+    access_mode = os.environ.get("BUNA_ACCESS_MODE", "")
+    if access_mode not in {"", "anonymous", "team", "email-gate"}:
+        raise RuntimeError("Unknown access policy; refusing startup.")
+    email_gate = access_mode == "email-gate"
+    allowed_email = os.environ.get("BUNA_ALLOWED_EMAIL", "").strip().casefold() if email_gate else ""
+    if email_gate and not re.fullmatch(r"[^@\s]{1,64}@[^@\s]+\.[^@\s]+", allowed_email):
+        raise RuntimeError("Email gate requires one configured email allowlist entry.")
+    team_config = None if email_gate else TeamConfig.from_environment()
     team_auth = team_authenticator or (TeamAuthenticator(team_config) if team_config else None)
+    if access_mode == "team" and team_auth is None:
+        raise RuntimeError("Team policy requires complete Microsoft authentication configuration.")
     private_manifest_sha = os.environ.get("BUNA_TEAM_CORPUS_SHA", "")
-    if private_manifest_sha:
-        if not team_config:
+    attested_manifest_sha = os.environ.get("BUNA_ATTESTED_CORPUS_SHA", "")
+    if private_manifest_sha and attested_manifest_sha:
+        raise RuntimeError("Conflicting corpus permission policies.")
+    if attested_manifest_sha:
+        if not email_gate:
+            raise RuntimeError("Attested hosted corpus requires the explicitly configured email gate.")
+        from buna.team_corpus import load_attested_corpus
+        papers = load_attested_corpus(corpus_root, attested_manifest_sha)
+    elif private_manifest_sha:
+        if not team_config or email_gate:
             raise RuntimeError("Private corpus requires complete team authentication configuration.")
         from buna.team_corpus import load_team_corpus
         papers = load_team_corpus(corpus_root, private_manifest_sha, team_config.tenant, team_config.owner_oid)
@@ -87,6 +111,7 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
     gate = threading.Lock()
     active = {}
     requests = defaultdict(deque)
+    gate_attempts = defaultdict(deque)
     stopping = threading.Event()
 
     def connect():
@@ -118,6 +143,9 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
             for key in list(requests):
                 if not requests[key] or requests[key][-1] < now - 60:
                     del requests[key]
+            for key in list(gate_attempts):
+                if not gate_attempts[key] or gate_attempts[key][-1] < now - 60:
+                    del gate_attempts[key]
 
     def maintenance():
         while not stopping.wait(60):
@@ -148,7 +176,7 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
             return getattr(request.state, "team_owner", None) or team_auth.authenticate(request.headers.get("authorization", ""))
         authorization = request.headers.get("authorization", "")
         if not authorization.startswith("Bearer ") or len(authorization) > 128:
-            raise HTTPException(401, "Anonymous session required.")
+            raise HTTPException(401, "A visitor session is required.")
         digest = hashlib.sha256(authorization[7:].encode()).hexdigest()
         with connect() as db:
             row = db.execute("SELECT created FROM sessions WHERE token=?", (digest,)).fetchone()
@@ -192,6 +220,14 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
                     headers.update({"Access-Control-Allow-Origin": origin, "Vary": "Origin"})
                 return JSONResponse({"detail": exc.detail}, exc.status_code,
                                     headers=headers)
+        if email_gate and request.url.path.startswith("/api/") and request.url.path not in {"/api/auth/config", "/api/public/session"} and request.method != "OPTIONS":
+            try:
+                session(request)
+            except HTTPException as exc:
+                headers = {"Cache-Control": "no-store"}
+                if supplied_origin == origin:
+                    headers.update({"Access-Control-Allow-Origin": origin, "Vary": "Origin"})
+                return JSONResponse({"detail": exc.detail}, exc.status_code, headers=headers)
         response = await call_next(request)
         response.headers["Cache-Control"] = "no-store"
         response.headers["X-Content-Type-Options"] = "nosniff"
@@ -201,16 +237,29 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
 
     @app.get("/health")
     def health():
-        return {"status": "ok", "mode": "team-restricted" if team_auth else "public-isolated", "engine": "2.5.3", "pdf_renderer": "5"}
+        return {"status": "ok", "mode": "email-gate" if email_gate else "team-restricted" if team_auth else "public-isolated", "engine": "2.5.3", "pdf_renderer": "5"}
 
     @app.get("/api/auth/config")
     def auth_config():
-        return team_auth.config.public() if team_auth else {"mode": "anonymous"}
+        return {"mode": "email-gate", "identity_verified": False} if email_gate else team_auth.config.public() if team_auth else {"mode": "anonymous"}
 
     @app.post("/api/public/session")
-    def new_session():
+    def new_session(request: Request, body: EmailGateInput | None = None):
         if team_auth:
             raise HTTPException(405, "Anonymous sessions are disabled; use Microsoft sign-in.")
+        if email_gate:
+            key = request.client.host if request.client else "unknown"
+            now = time.time()
+            with lock:
+                attempts = gate_attempts[key]
+                while attempts and attempts[0] < now - 60:
+                    attempts.popleft()
+                if len(attempts) >= 10:
+                    raise HTTPException(429, "Too many access attempts. Try again later.")
+                attempts.append(now)
+            supplied = body.email.strip().casefold() if body else ""
+            if not re.fullmatch(r"[^@\s]{1,64}@[^@\s]+\.[^@\s]+", supplied) or not hmac.compare_digest(supplied.encode(), allowed_email.encode()):
+                raise HTTPException(403, "Access is not available for this entry.")
         cleanup()
         token = secrets.token_urlsafe(32)
         with lock, connect() as db:
@@ -356,7 +405,7 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
                 attribution_fields = ("title", "attribution", "version", "license", "license_url", "source_url")
                 value = {"target": target_name, "title": Path(target.filename or "Manuscript").name[:255],
                          "sources": sources, "attributions": [{key: approved[i][key] for key in attribution_fields} for i in selected],
-                         "reports_only": team_auth is not None}
+                         "reports_only": team_auth is not None or email_gate}
                 (folder / "request.json").write_text(json.dumps(value))
             if not worker_runner:
                 os.chown(folder, uid, uid)

@@ -1,61 +1,41 @@
 import { useEffect, useRef, useState } from "react";
-import { PublicClientApplication, InteractionRequiredAuthError } from "@azure/msal-browser";
 import "./library.css";
 
 type Paper = { sha256: string; title: string; attribution: string; license: string; license_url: string; version: string };
 type Job = { id: string; status: string; checked?: number; total?: number; overlap_percent?: number; score_available?: boolean; partial?: boolean; warnings?: string[]; error?: string };
 const base = (import.meta.env.VITE_PUBLIC_API_URL || "").replace(/\/$/, "");
-const teamMode = import.meta.env.VITE_TEAM_MODE === "true";
+const gatedMode = import.meta.env.VITE_EMAIL_GATE === "true";
 
 export default function PublicApp() {
   const [papers, setPapers] = useState<Paper[]>([]);
   const [selected, setSelected] = useState<string[]>([]);
   const [target, setTarget] = useState<File | null>(null);
   const [sources, setSources] = useState<File[]>([]);
-  const [job, setJob] = useState<Job | null>(() => {
-    const id = sessionStorage.getItem("paper-overlap-public-job");
-    return id ? { id, status: "running" } : null;
-  });
+  const [job, setJob] = useState<Job | null>(null);
   const [retryStatus, setRetryStatus] = useState(0);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [consent, setConsent] = useState(false);
   const [loadingLibrary, setLoadingLibrary] = useState(true);
-  const [signedIn, setSignedIn] = useState(false);
-  const auth = useRef<{ client: PublicClientApplication; scope: string } | null>(null);
-  const authInit = useRef<Promise<void> | null>(null);
-  const token = useRef(sessionStorage.getItem("paper-overlap-public-session") || "");
+  const [entered, setEntered] = useState(false);
+  const [email, setEmail] = useState("");
+  const [gateReady, setGateReady] = useState(false);
+  const [entering, setEntering] = useState(false);
+  const token = useRef("");
   const urls = useRef<string[]>([]);
 
   async function request(path: string, options: RequestInit = {}) {
-    let bearer = token.current;
-    if (teamMode) {
-      const current = auth.current;
-      const account = current?.client.getActiveAccount();
-      if (!current || !account) throw new Error("Sign in with the approved Microsoft account.");
-      try {
-        bearer = (await current.client.acquireTokenSilent({ scopes: [current.scope], account })).accessToken;
-      } catch (e) {
-        if (e instanceof InteractionRequiredAuthError) {
-          setSignedIn(false);
-          throw new Error("Your Microsoft session needs confirmation. Sign in again.");
-        }
-        throw e;
-      }
-    }
     const response = await fetch(`${base}/api/public${path}`, {
-      ...options, signal: AbortSignal.timeout(90000), credentials: "omit", headers: { ...options.headers, ...(bearer ? { Authorization: `Bearer ${bearer}` } : {}) },
+      ...options, signal: AbortSignal.timeout(90000), credentials: "omit", headers: { ...options.headers, ...(token.current ? { Authorization: `Bearer ${token.current}` } : {}) },
     });
     if (!response.ok) {
       const data = await response.json().catch(() => ({}));
       if (response.status === 401) {
-        if (teamMode) setSignedIn(false);
+        setEntered(false);
         token.current = "";
-        sessionStorage.removeItem("paper-overlap-public-session");
-        sessionStorage.removeItem("paper-overlap-public-job");
         setJob(null);
+        setPapers([]); setSelected([]);
       } else if (response.status === 404 && path.startsWith("/jobs/")) {
-        sessionStorage.removeItem("paper-overlap-public-job");
         setJob(null);
       }
       throw new Error(typeof data.detail === "string" ? data.detail : `Request failed (${response.status}).`);
@@ -65,7 +45,7 @@ export default function PublicApp() {
   async function loadLibrary() {
     setLoadingLibrary(true); setError("");
     try {
-      const response = teamMode ? await request("/library") : await fetch(`${base}/api/public/library`, { credentials: "omit", signal: AbortSignal.timeout(90000) });
+      const response = gatedMode ? await request("/library") : await fetch(`${base}/api/public/library`, { credentials: "omit", signal: AbortSignal.timeout(90000) });
       if (!response.ok) throw new Error("Public comparison library is unavailable. Please retry.");
       const data = await response.json();
       setPapers(data.papers); setSelected(data.papers.map((p: Paper) => p.sha256));
@@ -73,33 +53,22 @@ export default function PublicApp() {
     finally { setLoadingLibrary(false); }
   }
   useEffect(() => {
-    if (teamMode) {
-      authInit.current ||= (async () => {
+    // Old browser references never transfer Microsoft-owned jobs into a new visitor session.
+    sessionStorage.removeItem("paper-overlap-public-session");
+    sessionStorage.removeItem("paper-overlap-public-job");
+    if (gatedMode) {
+      void (async () => {
         const response = await fetch(`${base}/api/auth/config`, { credentials: "omit", signal: AbortSignal.timeout(90000) });
-        if (!response.ok) throw new Error("Team sign-in is not available. Anonymous access is not used as a fallback.");
+        if (!response.ok) throw new Error("The service could not be reached. Retry shortly.");
         const config = await response.json();
-        if (config.mode !== "team") throw new Error("The service is not configured for team sign-in.");
-        const client = new PublicClientApplication({
-          auth: { clientId: config.client_id, authority: config.authority,
-                  redirectUri: window.location.origin + import.meta.env.BASE_URL,
-                  postLogoutRedirectUri: window.location.origin + import.meta.env.BASE_URL },
-          cache: { cacheLocation: "sessionStorage" },
-        });
-        await client.initialize();
-        const redirect = await client.handleRedirectPromise();
-        if (redirect?.account) client.setActiveAccount(redirect.account);
-        if (!client.getActiveAccount() && client.getAllAccounts().length === 1) client.setActiveAccount(client.getAllAccounts()[0]);
-        auth.current = { client, scope: config.scope };
-        setSignedIn(Boolean(client.getActiveAccount()));
-        if (client.getActiveAccount()) await loadLibrary();
-        else setLoadingLibrary(false);
-      })();
-      authInit.current.catch(e => { setError(e.message); setLoadingLibrary(false); });
+        if (config.mode !== "email-gate") throw new Error("The email access gate is not available yet.");
+        setGateReady(true); setLoadingLibrary(false);
+      })().catch(e => { setError(e.message); setLoadingLibrary(false); });
     } else void loadLibrary();
     return () => { urls.current.forEach(URL.revokeObjectURL); };
   }, []);
   useEffect(() => {
-    if (!job || job.status !== "running" || (teamMode && !signedIn)) return;
+    if (!job || job.status !== "running" || (gatedMode && !entered)) return;
     let stopped = false, failures = 0, timer = 0;
     async function poll() {
       try {
@@ -110,37 +79,41 @@ export default function PublicApp() {
     }
     timer = window.setTimeout(poll, 1000);
     return () => { stopped = true; window.clearTimeout(timer); };
-  }, [job?.id, job?.status, retryStatus, signedIn]);
+  }, [job?.id, job?.status, retryStatus, entered]);
 
   async function compare() {
     if (!target || !consent) return;
     setBusy(true); setError("");
     try {
-      if (!teamMode && !token.current) {
+      if (!gatedMode && !token.current) {
         const data = await (await request("/session", { method: "POST" })).json();
-        token.current = data.token; sessionStorage.setItem("paper-overlap-public-session", data.token);
+        token.current = data.token;
       }
       const form = new FormData();
       form.append("target", target); form.append("selected", JSON.stringify(selected));
       sources.forEach(file => form.append("sources", file));
       const created = await (await request("/jobs", { method: "POST", body: form })).json();
-      sessionStorage.setItem("paper-overlap-public-job", created.id);
       setJob(created);
     } catch (e) { setError((e as Error).message); }
     finally { setBusy(false); }
   }
-  async function signIn() {
-    if (!auth.current) return;
-    setError("");
-    try { await auth.current.client.loginRedirect({ scopes: [auth.current.scope], prompt: "select_account" }); }
+  async function enter() {
+    if (!gateReady || entering) return;
+    setError(""); setEntering(true);
+    try {
+      const response = await request("/session", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email }) });
+      const data = await response.json();
+      token.current = data.token; setEmail(""); setEntered(true);
+      await loadLibrary();
+    }
     catch (e) { setError((e as Error).message); }
+    finally { setEntering(false); }
   }
-  async function signOut() {
-    sessionStorage.removeItem("paper-overlap-public-job");
-    sessionStorage.removeItem("paper-overlap-public-session");
+  function leave() {
+    token.current = ""; setEntered(false);
     urls.current.forEach(URL.revokeObjectURL); urls.current = [];
     setJob(null); setPapers([]); setSelected([]);
-    if (auth.current) await auth.current.client.logoutRedirect();
+    setTarget(null); setSources([]); setConsent(false);
   }
   async function download(format: "pdf" | "json") {
     if (!job) return;
@@ -160,27 +133,26 @@ export default function PublicApp() {
     if (!job) return;
     try {
       const value = await (await request(`/jobs/${job.id}`, { method: "DELETE" })).json();
-      if (value.status === "deleted") sessionStorage.removeItem("paper-overlap-public-job");
       setJob(value.status === "deleted" ? null : { ...job, status: value.status });
     } catch (e) { setError((e as Error).message); }
   }
   return <div className="app-shell">
-    <header className="app-header"><strong>Paper Overlap Detector</strong><span>{teamMode ? "Private team workspace" : "Public preview"}</span>{teamMode && signedIn && <button onClick={signOut}>Sign out</button>}</header>
+    <header className="app-header"><strong>Paper Overlap Detector</strong><span>{gatedMode ? "Email access gate" : "Public preview"}</span>{gatedMode && entered && <button onClick={leave}>Leave workspace</button>}</header>
     <main className="public-main">
       <h1>Compare your paper</h1>
-      <p>Compare wording against the {teamMode ? "approved server-side" : "redistribution-reviewed"} library or your own comparison files. No plagiarism verdict or Crossref endorsement.</p>
-      <p className="reader-notice"><strong>Temporary online workspace.</strong> Uploaded documents are sent to this service’s Azure backend, not external AI or discovery providers. They are private to {teamMode ? "your approved Microsoft identity" : "this browser session"}, kept for up to one hour, and may disappear earlier on restart or scale-down. Download your report promptly. Do not upload confidential or sensitive manuscripts. This preview does not provide persistent personal libraries or DOI importing.{teamMode && " Comparison source files are not downloadable. Reports contain matched excerpts only, not full comparison papers."}</p>
+      <p>Compare wording against the approved server-side library or your own comparison files. No plagiarism verdict or Crossref endorsement.</p>
+      <p className="reader-notice"><strong>Temporary online workspace.</strong> Uploads are sent to this service’s Azure backend, not external AI or discovery providers. Each visit has a separate private workspace, kept for up to one hour and possibly lost earlier on restart or scale-down. Download reports before refreshing or leaving: the access token is held only in this page’s memory. Do not upload confidential or sensitive manuscripts. Comparison source files are not downloadable; reports contain matched passages. No persistent personal library or DOI importing.</p>
       {error && <p role="alert" className="app-error">{error}</p>}
-      {teamMode && !signedIn && <section><h2>Sign in to compare papers</h2><p>Only explicitly approved Microsoft accounts can access the library and comparisons.</p><button className="primary" disabled={!auth.current} onClick={signIn}>Sign in with Microsoft</button></section>}
+      {gatedMode && !entered && <section><h2>Enter your email</h2><p>Email access gate; email ownership is not verified. Anyone who knows an allowed email can enter.</p><label>Email<input type="email" maxLength={254} autoComplete="email" value={email} onChange={e => setEmail(e.target.value)} /></label><button className="primary" disabled={!gateReady || !email.trim() || entering} onClick={enter}>{entering ? "Continuing…" : "Continue"}</button></section>}
       {loadingLibrary && <p role="status">Starting the comparison service… This can take a moment after inactivity.</p>}
-      {!loadingLibrary && papers.length === 0 && (!teamMode || signedIn) && <button onClick={loadLibrary}>Retry connection</button>}
-      {!job && (!teamMode || signedIn) && <>
+      {!loadingLibrary && papers.length === 0 && (!gatedMode || entered) && <button onClick={loadLibrary}>Retry connection</button>}
+      {!job && (!gatedMode || entered) && <>
         <div className="public-uploads">
           <label>Your paper<input type="file" accept=".pdf,.txt" onChange={e => setTarget(e.target.files?.[0] || null)} /></label>
           <label>Your comparison papers (optional)<input type="file" multiple accept=".pdf,.txt" onChange={e => setSources(Array.from(e.target.files || []))} /></label>
         </div>
         <p>PDF or text. Manuscript: 10 MiB / 250 pages / 250,000 characters. Up to five personal sources, 8 MiB each. Total request: 32 MiB. One comparison runs at a time; daily service quotas apply.</p>
-        <details><summary>{teamMode ? "Default papers" : "Public library"}: {selected.length} of {papers.length} selected</summary>
+        <details><summary>Default papers: {selected.length} of {papers.length} selected</summary>
           {papers.map(p => <label className="public-paper" key={p.sha256}>
             <input type="checkbox" checked={selected.includes(p.sha256)} onChange={e => setSelected(e.target.checked ? [...selected, p.sha256] : selected.filter(id => id !== p.sha256))} />
             <span>{p.title}<small>{p.version}</small></span>
@@ -189,7 +161,7 @@ export default function PublicApp() {
         <label className="public-consent"><input type="checkbox" checked={consent} onChange={e => setConsent(e.target.checked)} /> I may upload these documents and understand the online processing and temporary retention described above.</label>
         <button className="primary" disabled={!target || !consent || (!selected.length && !sources.length) || busy} onClick={compare}>{busy ? "Uploading…" : "Compare papers"}</button>
       </>}
-      {job && (!teamMode || signedIn) && <section aria-live="polite">
+      {job && (!gatedMode || entered) && <section aria-live="polite">
         <h2>{job.status === "complete" ? "Your report is ready" : job.status === "running" ? "Comparing your paper…" : "Comparison stopped"}</h2>
         {job.status === "complete" && <>
           <p>{job.checked}/{job.total} papers fully checked. {job.partial ? "Partial results; overlap is a lower bound. " : ""}{job.score_available === false ? "No score available." : `${job.overlap_percent}% text overlap.`}</p>
@@ -202,7 +174,7 @@ export default function PublicApp() {
         {error && job.status === "running" && <button onClick={() => setRetryStatus(value => value + 1)}>Retry status</button>}
         <button onClick={remove}>{job.status === "running" ? "Cancel comparison" : "Delete temporary comparison"}</button>
       </section>}
-      {(!teamMode || signedIn) && <details><summary>Library attribution and licenses</summary>
+      {(!gatedMode || entered) && <details><summary>Library attribution and licenses</summary>
         <button onClick={credits}>Download source credits</button>
         {papers.map(p => <section key={p.sha256}><h3>{p.title}</h3><p>{p.attribution}</p><a href={p.license_url} target="_blank" rel="noreferrer">{p.license}</a><p>{p.version}</p></section>)}
       </details>}

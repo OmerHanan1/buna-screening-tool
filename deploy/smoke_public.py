@@ -2,17 +2,27 @@
 import argparse
 import json
 import time
+import os
 import httpx
 import pymupdf
 
 
-def smoke(base: str):
+def smoke(base: str, email: str | None = None):
     sentence = "The ceramic sensor records a stable sequence of local measurements during every carefully controlled laboratory cycle."
     with httpx.Client(base_url=base, timeout=90) as client:
         client.get("/health").raise_for_status()
-        first = {"Authorization": "Bearer " + client.post("/api/public/session").json()["token"]}
-        second = {"Authorization": "Bearer " + client.post("/api/public/session").json()["token"]}
-        library = client.get("/api/public/library").json()["papers"]
+        if email is not None:
+            assert client.post("/api/public/session", json={"email": "not-allowed@example.invalid"}).status_code == 403
+        first_response = client.post("/api/public/session", json={"email": "  " + email.upper() + "  "} if email else None)
+        first_response.raise_for_status()
+        second_response = client.post("/api/public/session", json={"email": email} if email else None)
+        second_response.raise_for_status()
+        first = {"Authorization": "Bearer " + first_response.json()["token"]}
+        second = {"Authorization": "Bearer " + second_response.json()["token"]}
+        assert first != second
+        library_response = client.get("/api/public/library", headers=first)
+        library_response.raise_for_status()
+        library = library_response.json()["papers"]
         response = client.post("/api/public/jobs", headers=first,
             data={"selected": json.dumps([p["sha256"] for p in library])},
             files=[("target", ("synthetic.txt", ("Abstract\n" + sentence + "\nOriginal target ending.").encode())),
@@ -29,6 +39,9 @@ def smoke(base: str):
             time.sleep(4)
         assert result["status"] == "complete", result
         assert result["checked"] == len(library) + 1 and result["overlap_percent"] > 0, result
+        evidence = client.get(path + "/report.json", headers=first)
+        evidence.raise_for_status()
+        assert all(row["source_windows_visited"] == row["source_windows_total"] for row in evidence.json()["source_coverage"])
         assert client.get(path, headers=second).status_code == 404
         assert client.get(path + "/report.pdf", headers=second).status_code == 404
         assert client.get(path + "/report.pdf").status_code == 401
@@ -39,8 +52,9 @@ def smoke(base: str):
             assert "Public source attribution" in text
             assert "Journal of Medical Internet Research" in text
             assert "Editorial: Emotion regulation" in text
-        assert client.get("/api/jobs").status_code == 404
-        assert client.post("/api/library/imports", json={}).status_code == 404
+        assert client.get("/api/jobs", headers=first).status_code == 404
+        assert client.post("/api/library/imports", headers=first, json={}).status_code == 404
+        assert client.get("/api/public/sources/" + library[0]["sha256"], headers=first).status_code == 404
         client.delete(path, headers=first).raise_for_status()
         assert client.get(path, headers=first).status_code == 404
         return {"curated_sources": len(library), "fully_checked": result["checked"],
@@ -51,5 +65,6 @@ def smoke(base: str):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base", default="http://127.0.0.1:8080")
+    parser.add_argument("--email-gate", action="store_true", help="Read allowed test email from BUNA_TEST_EMAIL; never log it.")
     args = parser.parse_args()
-    print(json.dumps(smoke(args.base)))
+    print(json.dumps(smoke(args.base, os.environ["BUNA_TEST_EMAIL"] if args.email_gate else None)))

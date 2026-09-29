@@ -14,7 +14,7 @@
 !release-context
 !release-context/wheels
 !release-context/wheels/*.whl
-!release-context/public-corpus
-!release-context/public-corpus/manifest.json
-!release-context/public-corpus/*.pdf
-!release-context/public-corpus/*.txt
+!release-context/hosted-corpus
+!release-context/hosted-corpus/manifest.json
+!release-context/hosted-corpus/*.pdf
+!release-context/hosted-corpus/*.txt
