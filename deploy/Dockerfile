@@ -12,6 +12,7 @@ COPY buna /app/buna
 COPY frontend/src/theme.css /app/frontend/src/theme.css
 COPY deploy/smoke_public.py /app/deploy/smoke_public.py
 COPY deploy/benchmark_hosted.py /app/deploy/benchmark_hosted.py
+COPY deploy/verify_shared.py /app/deploy/verify_shared.py
 COPY release-context/wheels /wheels
 RUN pip install --no-index --find-links=/wheels setuptools wheel \
     && pip install --no-index --find-links=/wheels --no-build-isolation . \

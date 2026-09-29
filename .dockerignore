@@ -12,6 +12,7 @@
 !deploy/Dockerfile
 !deploy/smoke_public.py
 !deploy/benchmark_hosted.py
+!deploy/verify_shared.py
 !release-context
 !release-context/wheels
 !release-context/wheels/*.whl
