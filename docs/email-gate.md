@@ -7,7 +7,10 @@ verified ownership, secure team sign-in or a substitute for paper-use permission
 
 ## Visitor privacy
 
-`BUNA_ACCESS_MODE=email-gate` requires one `BUNA_ALLOWED_EMAIL` server setting.
+`BUNA_ACCESS_MODE=email-gate` requires a `BUNA_ALLOWED_EMAIL` server setting
+containing one email or a comma-separated list of emails. Each configured entry
+is trimmed and case-normalized; empty or invalid entries fail startup.
+Existing single-email configuration remains supported.
 The gate trims/case-normalizes the submitted email, applies basic format/length
 checks, and returns a generic rejection for entries not on the allowlist.
 Attempts are rate-limited. Submitted emails are not saved with sessions/jobs.
@@ -15,7 +18,8 @@ Attempts are rate-limited. Submitted emails are not saved with sessions/jobs.
 Each accepted request mints a new cryptographically random visitor capability.
 The browser keeps it only in page memory; the server stores its hash. The email
 is **never the job-owner key**. Two visitors entering the same email get distinct
-workspaces and cannot read/cancel/delete each other's jobs or reports.
+workspaces and cannot read/cancel/delete each other's jobs or reports. Visitors
+using different allowed emails have the same independent capability isolation.
 Microsoft-issued tokens and old identity-owned jobs are not converted or adopted.
 Refreshing/leaving the page loses its capability; download reports first.
 Files/results remain temporary for up to an hour and may disappear sooner on
@@ -66,6 +70,13 @@ compared inside the unchanged processing budget.
 Check active jobs before changing a live revision, preserve the local 44-source
 library and prior preferences, and leave Azure at minimum zero / maximum one
 replica. Budget notifications are not hard spending caps.
+
+Multi-email configuration requires an image with comma-separated allowlist
+support; older single-email images reject it at startup. Deploy compatible code
+before updating the existing `allowed-email` secret, and coordinate a safe idle
+window before rolling the revision. Never replace the original entry when
+granting an additional visitor access. No frontend email list or Pages deployment
+is needed.
 
 ## Runtime reliability
 

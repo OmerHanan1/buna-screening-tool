@@ -74,9 +74,11 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
     if access_mode not in {"", "anonymous", "team", "email-gate"}:
         raise RuntimeError("Unknown access policy; refusing startup.")
     email_gate = access_mode == "email-gate"
-    allowed_email = os.environ.get("BUNA_ALLOWED_EMAIL", "").strip().casefold() if email_gate else ""
-    if email_gate and not re.fullmatch(r"[^@\s]{1,64}@[^@\s]+\.[^@\s]+", allowed_email):
-        raise RuntimeError("Email gate requires one configured email allowlist entry.")
+    allowed_emails = tuple(entry.strip().casefold() for entry in
+                           os.environ.get("BUNA_ALLOWED_EMAIL", "").split(",")) if email_gate else ()
+    if email_gate and any(len(entry) > 254 or not re.fullmatch(r"[^@\s]{1,64}@[^@\s]+\.[^@\s]+", entry)
+                          for entry in allowed_emails):
+        raise RuntimeError("Email gate requires valid comma-separated email allowlist entries.")
     team_config = None if email_gate else TeamConfig.from_environment()
     team_auth = team_authenticator or (TeamAuthenticator(team_config) if team_config else None)
     if access_mode == "team" and team_auth is None:
@@ -265,7 +267,9 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
                     raise HTTPException(429, "Too many access attempts. Try again later.")
                 attempts.append(now)
             supplied = body.email.strip().casefold() if body else ""
-            if not re.fullmatch(r"[^@\s]{1,64}@[^@\s]+\.[^@\s]+", supplied) or not hmac.compare_digest(supplied.encode(), allowed_email.encode()):
+            if not re.fullmatch(r"[^@\s]{1,64}@[^@\s]+\.[^@\s]+", supplied) or not sum(
+                hmac.compare_digest(supplied.encode(), allowed_email.encode()) for allowed_email in allowed_emails
+            ):
                 raise HTTPException(403, "Access is not available for this entry.")
         cleanup()
         token = secrets.token_urlsafe(32)

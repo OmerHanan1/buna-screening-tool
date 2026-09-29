@@ -19,6 +19,7 @@ param teamOwnerObjectId string = ''
 @allowed(['', 'anonymous', 'team', 'email-gate'])
 param accessMode string = ''
 @secure()
+@description('One email or comma-separated allowed emails; requires a multi-email-compatible image for lists.')
 param allowedEmail string = ''
 param attestedCorpusSha string = ''
 
