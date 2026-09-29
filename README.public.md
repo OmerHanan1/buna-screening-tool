@@ -3,16 +3,24 @@
 A scientific-paper **text-overlap screening tool for human review**, not a
 plagiarism verdict or a reproduction of Crossref/Turnitin's proprietary service.
 
-The public preview uses a redistribution-reviewed paper library and optional
+The hosted site now requires the **explicitly approved owner's Microsoft sign-in**.
+The static login page is public; library, uploads, comparisons and reports are
+authorized by the backend. See [`docs/team-deployment.md`](docs/team-deployment.md).
+Sign-in does not expand paper-use rights: the initial protected release retains
+12 reviewed sources, not all files in the separate local library.
+
+The hosted service uses a reviewed paper library and optional
 personal comparison uploads. It produces real PDFs with original manuscript
 pages, source-numbered highlights and source-passage comments, plus JSON evidence.
 New comparisons begin at a recognized Abstract heading; otherwise a visible
 warning explains the whole-manuscript fallback.
 
-Public uploads are isolated by anonymous browser capability, expire within one
+Hosted uploads are isolated by validated Microsoft identity, expire within one
 hour, and can disappear sooner on restart/scale-down. Download results promptly.
 Do not upload sensitive or confidential manuscripts. This preview does **not**
 offer DOI import, a persistent visitor library or permanent comparison history.
+Comparison source files have no download/full-text endpoint; reports preserve
+complete matched passages without adding the full source documents.
 
 ## Code and deployment
 
