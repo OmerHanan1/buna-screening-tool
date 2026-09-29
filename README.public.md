@@ -27,6 +27,13 @@ offer DOI import, a persistent visitor library or permanent comparison history.
 Comparison source files have no download/full-text endpoint; reports preserve
 complete matched passages without adding the full source documents.
 
+The hosted workspace starts with all available default papers selected. Use
+**Review papers** to search, deselect or inspect credits, then upload a manuscript
+and choose **Compare papers**. Optional comparison uploads stay separate from the
+default library. Results offer **Open PDF** and **Download PDF**; methodology,
+privacy details and source credits are kept in secondary disclosures. File
+validation, incomplete results and expired-session errors remain visible.
+
 ## Code and deployment
 
 * `buna/public_app.py`: isolated anonymous public API; it never serves the local store.

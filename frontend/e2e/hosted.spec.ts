@@ -1,0 +1,136 @@
+import { test, expect } from "@playwright/test";
+import fs from "node:fs/promises";
+import path from "node:path";
+
+const site = "https://omerhanan1.github.io/buna-screening-tool/";
+const backend = "https://paper-overlap-api.purpleflower-beedf5ce.eastus.azurecontainerapps.io";
+const papers = Array.from({ length: 44 }, (_, i) => ({
+  sha256: i.toString(16).padStart(64, "0"),
+  title: [
+    "Emotion regulation and attention in everyday decision making",
+    "How psychological distance shapes memory and social judgment",
+    "Cognitive flexibility across the lifespan: a longitudinal study",
+    "The role of context in evaluating emotional experiences",
+  ][i % 4] + ` — study ${i + 1}`,
+  version: i % 3 ? "Published article · Original complete PDF" : "Author manuscript · Institutional repository",
+  attribution: "Synthetic Author. Original test fixture; not an actual scientific paper.",
+  license: "Synthetic test fixture", license_url: "https://example.org/license",
+}));
+
+for (const variant of [
+  { name: "desktop-light", width: 1440, height: 1000, theme: "light" },
+  { name: "laptop-light", width: 1100, height: 800, theme: "light" },
+  { name: "mobile-light", width: 390, height: 844, theme: "light" },
+  { name: "desktop-dark", width: 1440, height: 1000, theme: "dark" },
+  { name: "mobile-dark", width: 390, height: 844, theme: "dark" },
+]) {
+  test(`hosted workspace ${variant.name}`, async ({ page }) => {
+    await page.setViewportSize(variant);
+    let complete = false, submitted = false;
+    await page.route(site + "**", async route => {
+      const name = new URL(route.request().url()).pathname.replace("/buna-screening-tool/", "") || "index.html";
+      const filename = path.resolve("../public-dist", name);
+      expect(filename.startsWith(path.resolve("../public-dist") + path.sep)).toBe(true);
+      await route.fulfill({ body: await fs.readFile(filename), contentType: name.endsWith(".js") ? "text/javascript" : name.endsWith(".css") ? "text/css" : "text/html" });
+    });
+    await page.route(backend + "/**", async route => {
+      const url = new URL(route.request().url()), method = route.request().method();
+      const respond = (json: unknown, status = 200) => route.fulfill({ json, status });
+      if (url.pathname === "/api/auth/config") return respond({ mode: "email-gate" });
+      if (url.pathname.endsWith("/session")) {
+        return route.request().postDataJSON().email.trim().toLowerCase() === "allowed@example.org"
+          ? respond({ token: "synthetic-capability-only" }) : respond({ detail: "Access is not available for this entry." }, 403);
+      }
+
+      expect(route.request().headers().authorization).toBe("Bearer synthetic-capability-only");
+      if (url.pathname.endsWith("/library")) return respond({ papers });
+      if (method === "POST") { submitted = true; return respond({ id: "synthetic-job", status: "running" }, 202); }
+      if (method === "DELETE") return respond({ status: "deleted" });
+      if (url.pathname.endsWith(".pdf")) return route.fulfill({ contentType: "application/pdf", body: "%PDF-1.7\nSynthetic download signature fixture" });
+      return respond(complete ? { id: "synthetic-job", status: "complete", checked: 44, total: 44, overlap_percent: 8.42, score_available: true, warnings: ["Analysis starts at the Abstract heading on page 2; 18 preceding front-matter words were excluded."] } : { id: "synthetic-job", status: "running" });
+    });
+    await page.goto(site + "?clawpilotTheme=" + variant.theme);
+    await expect(page.getByRole("button", { name: "Continue", exact: true })).toBeDisabled();
+    await page.screenshot({ path: test.info().outputPath("01-email.png"), fullPage: true });
+    await page.getByLabel("Email address").fill("wrong@example.org");
+    await page.getByRole("button", { name: "Continue", exact: true }).click();
+    await expect(page.getByRole("alert")).toContainText("Access is not available");
+    await page.screenshot({ path: test.info().outputPath("02-email-error.png"), fullPage: true });
+    await page.getByLabel("Email address").fill("allowed@example.org");
+    await page.getByRole("button", { name: "Continue", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "44 papers selected" })).toBeVisible();
+    await page.screenshot({ path: test.info().outputPath("03-setup.png"), fullPage: true });
+    await page.getByRole("button", { name: "Review papers", exact: true }).click();
+    await expect(page.getByRole("dialog")).toBeVisible();
+    await page.getByLabel("Search comparison papers").fill("memory");
+    await expect(page.locator(".hosted-source-item")).toHaveCount(11);
+    await page.getByLabel("Search comparison papers").fill("");
+    await page.locator(".hosted-source-item input").first().uncheck();
+    await expect(page.getByText("43 of 44 selected", { exact: true })).toBeVisible();
+    await page.screenshot({ path: test.info().outputPath("04-library.png"), fullPage: true });
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Review papers", exact: true })).toBeFocused();
+    await expect(page.getByRole("heading", { name: "43 papers selected" })).toBeVisible();
+    await page.getByLabel("Your paper", { exact: true }).setInputFiles({ name: "bad.pdf", mimeType: "application/pdf", buffer: Buffer.from("not a PDF") });
+    await expect(page.getByRole("alert")).toContainText("valid PDF header");
+    await page.getByLabel("Your paper", { exact: true }).setInputFiles({ name: "Synthetic manuscript — attention and memory.txt", mimeType: "text/plain", buffer: Buffer.from("Abstract\nAn original synthetic manuscript for interface testing.") });
+    await expect(page.getByText("Ready to upload", { exact: true })).toBeVisible();
+    await page.getByLabel("Additional comparison papers").setInputFiles({ name: "Additional source.txt", mimeType: "text/plain", buffer: Buffer.from("Synthetic source material.") });
+    await expect(page.getByRole("button", { name: "Remove comparison Additional source.txt" })).toBeVisible();
+    await page.screenshot({ path: test.info().outputPath("05-files-selected.png"), fullPage: true });
+    await expect(page.getByRole("button", { name: "Compare papers", exact: true })).toBeDisabled();
+    await page.getByRole("checkbox", { name: /authorized to upload/ }).check();
+    await page.getByRole("button", { name: "Compare papers", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "Comparing your manuscript" })).toBeVisible();
+    expect(submitted).toBe(true);
+    await page.screenshot({ path: test.info().outputPath("06-progress.png"), fullPage: true });
+    complete = true;
+    await expect(page.getByRole("heading", { name: "Comparison report", exact: true })).toBeVisible();
+    await page.screenshot({ path: test.info().outputPath("07-result.png"), fullPage: true });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    const download = page.waitForEvent("download");
+    await page.getByRole("button", { name: "Download PDF", exact: true }).click();
+    expect((await download).suggestedFilename()).toBe("paper-overlap-report.pdf");
+    expect(await page.evaluate(() => Object.keys(sessionStorage).some(key => key.includes("paper-overlap-public")))).toBe(false);
+    page.on("dialog", dialog => dialog.accept());
+    await page.getByRole("button", { name: "Delete report", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "New comparison", exact: true })).toBeVisible();
+  });
+}
+
+test("expired sessions and partial/no-score results stay explicit", async ({ page }) => {
+  let expired = false, complete = false;
+  await page.route(site + "**", async route => {
+    const name = new URL(route.request().url()).pathname.replace("/buna-screening-tool/", "") || "index.html";
+    await route.fulfill({ body: await fs.readFile(path.resolve("../public-dist", name)), contentType: name.endsWith(".js") ? "text/javascript" : name.endsWith(".css") ? "text/css" : "text/html" });
+  });
+  await page.route(backend + "/**", async route => {
+    const url = new URL(route.request().url());
+    if (url.pathname.endsWith("/config")) return route.fulfill({ json: { mode: "email-gate" } });
+    if (url.pathname.endsWith("/session")) return route.fulfill({ json: { token: "synthetic-only" } });
+    if (url.pathname.endsWith("/library")) return route.fulfill({ json: { papers } });
+    if (route.request().method() === "POST") return route.fulfill({ json: { id: "test", status: "running" }, status: 202 });
+    if (expired) return route.fulfill({ status: 401, json: { detail: "Expired." } });
+    return route.fulfill({ json: complete ? {
+      id: "test", status: "complete", checked: 0, total: 44, partial: true, score_available: false,
+      warnings: ["Abstract heading not detected; the whole manuscript was analyzed (front matter was not excluded)."],
+    } : { id: "test", status: "running" } });
+  });
+  await page.goto(site);
+  await page.getByLabel("Email address").fill("allowed@example.org");
+  await page.getByRole("button", { name: "Continue", exact: true }).click();
+  await page.getByRole("heading", { name: "44 papers selected" }).waitFor();
+  await page.getByLabel("Your paper", { exact: true }).setInputFiles({ name: "fixture.txt", mimeType: "text/plain", buffer: Buffer.from("Synthetic text.") });
+  await page.getByRole("checkbox", { name: /authorized to upload/ }).check();
+  await page.getByRole("button", { name: "Compare papers", exact: true }).click();
+  complete = true;
+  await expect(page.getByText("Not assessed", { exact: true })).toBeVisible();
+  await expect(page.getByText(/Comparison incomplete. No score is available/)).toBeVisible();
+  await expect(page.getByText(/Abstract heading not detected/)).toBeVisible();
+  expired = true;
+  await page.getByRole("button", { name: "Download PDF", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("workspace expired");
+  await expect(page.getByLabel("Email address")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Comparison report", exact: true })).toHaveCount(0);
+});
