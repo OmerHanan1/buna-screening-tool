@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { ArrowRight, Download, ExternalLink, FileText, LoaderCircle, Plus, X } from "lucide-react";
+import { ArrowRight, FileText, LoaderCircle, Plus, X } from "lucide-react";
+import PdfActions from "./PdfActions";
 import { Elapsed, fileSize, ManuscriptInput, PaperDialog, validateFile, type HostedPaper } from "./PublicControls";
 import "./public.css";
 
@@ -36,16 +37,21 @@ export default function PublicApp() {
 
   async function request(path: string, options: RequestInit = {}) {
     const response = await fetch(`${base}/api/public${path}`, {
-      ...options, signal: AbortSignal.timeout(90000), credentials: "omit",
+      ...options, signal: options.signal ?? AbortSignal.timeout(90000), credentials: "omit",
       headers: { ...options.headers, ...(token.current ? { Authorization: `Bearer ${token.current}` } : {}) },
     });
     if (!response.ok) {
       const data = await response.json().catch(() => ({}));
       if (response.status === 401) {
         setEntered(false); token.current = ""; setJob(null); setPapers([]); setSelected([]);
-        throw new Error("This workspace expired or the service restarted. Enter your email to start a new one.");
+        const message = "This workspace expired or the service restarted. Enter your email to start a new one.";
+        setError(message);
+        throw new Error(message);
       }
-      if (response.status === 404 && path.startsWith("/jobs/")) setJob(null);
+      if (response.status === 404 && path.startsWith("/jobs/")) {
+        setJob(null);
+        setError("This comparison is no longer available. Temporary reports expire or may be lost after a service restart.");
+      }
       throw new Error(typeof data.detail === "string" ? data.detail : `Request failed (${response.status}).`);
     }
     return response;
@@ -146,21 +152,15 @@ export default function PublicApp() {
     } catch (e) { setError((e as Error).message); }
     finally { setBusy(false); }
   }
-  async function reportFile(format: "pdf" | "json", open = false) {
+  async function reportFile(format: "json") {
     if (!job || pdfBusy) return;
-    const viewer = open ? window.open("about:blank", "_blank") : null;
-    if (viewer) viewer.opener = null;
     setPdfBusy(true); setError("");
     try {
       const blob = await (await request(`/jobs/${job.id}/report.${format}`)).blob();
       const url = URL.createObjectURL(blob); urls.current.push(url);
-      if (open) {
-        if (!viewer) throw new Error("Your browser blocked the PDF tab. Use Download PDF instead.");
-        viewer.location.replace(url);
-      } else {
-        const link = document.createElement("a"); link.href = url; link.download = `paper-overlap-report.${format}`; link.click();
-      }
-    } catch (e) { viewer?.close(); setError((e as Error).message); }
+      const link = document.createElement("a"); link.href = url; link.download = `paper-overlap-report.${format}`;
+      document.body.appendChild(link); link.click(); link.remove();
+    } catch (e) { setError((e as Error).message); }
     finally { setPdfBusy(false); }
   }
   function credits() {
@@ -233,7 +233,7 @@ export default function PublicApp() {
             <div className="hosted-surface">
               <div className="hosted-report-header"><FileText size={24} aria-hidden="true" /><div className="hosted-report-name"><h2>{submitted.title || "Your manuscript"}</h2><p>Annotated PDF · Matching source passages included</p></div></div>
               <div className="hosted-report-metrics"><div><strong>{job.score_available === false ? "Not assessed" : `${job.overlap_percent}%`}</strong><span>Text overlap{job.partial && job.score_available !== false ? " · lower bound" : ""}</span></div><div><strong className="hosted-small-metric">{job.checked} / {job.total}</strong><span>Papers fully checked</span></div></div>
-              <div className="hosted-report-actions"><button className="hosted-primary" disabled={pdfBusy} onClick={() => reportFile("pdf", true)}><ExternalLink size={15} />{pdfBusy ? "Preparing…" : "Open PDF"}</button><button disabled={pdfBusy} onClick={() => reportFile("pdf")}><Download size={15} />Download PDF</button></div>
+              <PdfActions jobId={job.id} load={signal => request(`/jobs/${job.id}/report.pdf`, { signal })} />
             </div>
             <p className="hosted-report-note">Download before refreshing or leaving. For side comments, open the PDF’s Comments panel in Acrobat Reader.</p>
             <details className="hosted-info"><summary>Report details and evidence</summary><p>Saved engine: {job.algorithm_version || "not recorded"} · Text overlap for review, not a plagiarism verdict. Scores retain the saved comparison basis.</p>{job.warnings?.filter(w => w !== fallbackWarning).map((w, i) => <p key={i}>{w}</p>)}<button onClick={() => reportFile("json")}>Download evidence JSON</button></details>

@@ -168,6 +168,16 @@ The frontend shell is static, but entry readiness still waits for the scale-to-z
 API to wake up. Connection failures must show a retry action. New hosts/revisions
 do not migrate in-memory visitor capabilities or temporary jobs.
 
+Completed reports are fetched and validated once into page memory before PDF
+actions are enabled. Open/Download are then native blob links activated directly
+by the user's click, not a network-dependent popup or detached download click.
+PDF transfer has a 60-second timeout, byte progress, stop and retry controls;
+retry never starts a new comparison. Payload type/signature and size are checked.
+Browser PDF viewer support still varies; downloading and opening locally remains
+available. A static frontend update does not replace JavaScript already loaded
+in an existing tab: do not tell visitors to refresh an undownloaded result without
+warning that their memory-only capability would be lost.
+
 Run frontend unit and hosted browser checks, then the opt-in actual flow with an
 authorized email supplied privately through `HOSTED_TEST_EMAIL`:
 

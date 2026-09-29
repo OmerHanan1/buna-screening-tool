@@ -96,12 +96,12 @@ test("opt-in actual hosted PDF workflow", async ({ page }) => {
   await expect(page.getByText("45 / 45", { exact: true })).toBeVisible();
   await page.screenshot({ path: test.info().outputPath("live-result-desktop.png"), fullPage: true });
   const popupWait = page.waitForEvent("popup");
-  await page.getByRole("button", { name: "Open PDF", exact: true }).click();
+  await page.getByRole("link", { name: "Open PDF", exact: true }).click();
   const popup = await popupWait;
   await expect.poll(() => popup.url(), { timeout: 90_000 }).toMatch(/^blob:/);
   await popup.close();
   const downloadWait = page.waitForEvent("download");
-  await page.getByRole("button", { name: "Download PDF", exact: true }).click();
+  await page.getByRole("link", { name: "Download PDF", exact: true }).click();
   const download = await downloadWait;
   expect(download.suggestedFilename()).toBe("paper-overlap-report.pdf");
   const chunks: Buffer[] = [];
@@ -158,6 +158,52 @@ const papers = Array.from({ length: 44 }, (_, i) => ({
   attribution: "Synthetic Author. Original test fixture; not an actual scientific paper.",
   license: "Synthetic test fixture", license_url: "https://example.org/license",
 }));
+
+test("PDF transfer timeout is retryable without rerunning or losing the comparison", async ({ page }) => {
+  let holdPdf = true, pdfRequests = 0, comparisons = 0;
+  await page.clock.install();
+  await page.route(site + "**", async route => {
+    const name = new URL(route.request().url()).pathname.replace(new URL(site).pathname, "") || "index.html";
+    const filename = path.resolve("../public-dist", name);
+    await route.fulfill({ body: await fs.readFile(filename), contentType: name.endsWith(".js") ? "text/javascript" : name.endsWith(".css") ? "text/css" : "text/html" });
+  });
+  await page.route(backend + "/**", async route => {
+    const url = new URL(route.request().url());
+    if (url.pathname.endsWith("/config")) return route.fulfill({ json: { mode: "email-gate" } });
+    if (url.pathname.endsWith("/session")) return route.fulfill({ json: { token: "synthetic-transfer-capability" } });
+    if (url.pathname.endsWith("/library")) return route.fulfill({ json: { papers } });
+    if (route.request().method() === "POST") {
+      comparisons++; return route.fulfill({ status: 202, json: { id: "transfer-fixture", status: "running" } });
+    }
+    if (url.pathname.endsWith(".pdf")) {
+      pdfRequests++;
+      if (holdPdf) return;
+      return route.fulfill({ contentType: "application/pdf", body: "%PDF-1.7\nSynthetic transfer fixture" });
+    }
+    return route.fulfill({ json: { id: "transfer-fixture", status: "complete", checked: 44, total: 44, overlap_percent: 1.2, score_available: true } });
+  });
+  await page.goto(site);
+  await page.getByLabel("Email address").fill("fixture@example.org");
+  await page.getByRole("button", { name: "Continue", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "44 papers selected" })).toBeVisible();
+  await page.getByLabel("Your paper", { exact: true }).setInputFiles({ name: "synthetic.txt", mimeType: "text/plain", buffer: Buffer.from("Original synthetic target text.") });
+  await page.getByRole("checkbox", { name: /authorized to upload/ }).check();
+  await page.getByRole("button", { name: "Compare papers", exact: true }).click();
+  await page.clock.fastForward(2000);
+  await expect(page.getByRole("heading", { name: "Comparison report", exact: true })).toBeVisible();
+  await expect(page.getByText("Preparing PDF access…", { exact: true })).toBeVisible();
+  await page.clock.fastForward(61000);
+  await expect(page.getByRole("alert")).toContainText("PDF transfer timed out");
+  await expect(page.getByRole("heading", { name: "Comparison report", exact: true })).toBeVisible();
+  holdPdf = false;
+  await page.getByRole("button", { name: "Retry PDF transfer", exact: true }).click();
+  await expect(page.getByRole("link", { name: "Open PDF", exact: true })).toHaveAttribute("href", /^blob:/);
+  const downloadWait = page.waitForEvent("download");
+  await page.getByRole("link", { name: "Download PDF", exact: true }).click();
+  expect((await downloadWait).suggestedFilename()).toBe("paper-overlap-report.pdf");
+  expect(comparisons).toBe(1);
+  expect(pdfRequests).toBe(2);
+});
 
 for (const variant of [
   { name: "desktop-light", width: 1440, height: 1000, theme: "light" },
@@ -229,7 +275,7 @@ for (const variant of [
     await page.screenshot({ path: test.info().outputPath("07-result.png"), fullPage: true });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     const download = page.waitForEvent("download");
-    await page.getByRole("button", { name: "Download PDF", exact: true }).click();
+    await page.getByRole("link", { name: "Download PDF", exact: true }).click();
     expect((await download).suggestedFilename()).toBe("paper-overlap-report.pdf");
     expect(await page.evaluate(() => Object.keys(sessionStorage).some(key => key.includes("paper-overlap-public")))).toBe(false);
     page.on("dialog", dialog => dialog.accept());
@@ -250,6 +296,7 @@ test("expired sessions and partial/no-score results stay explicit", async ({ pag
     if (url.pathname.endsWith("/library")) return route.fulfill({ json: { papers } });
     if (route.request().method() === "POST") return route.fulfill({ json: { id: "test", status: "running" }, status: 202 });
     if (expired) return route.fulfill({ status: 401, json: { detail: "Expired." } });
+    if (url.pathname.endsWith(".pdf")) return route.fulfill({ contentType: "application/pdf", body: "%PDF-1.7\nSynthetic fixture" });
     return route.fulfill({ json: complete ? {
       id: "test", status: "complete", checked: 0, total: 44, partial: true, score_available: false,
       warnings: ["Abstract heading not detected; the whole manuscript was analyzed (front matter was not excluded)."],
@@ -267,7 +314,8 @@ test("expired sessions and partial/no-score results stay explicit", async ({ pag
   await expect(page.getByText(/Comparison incomplete. No score is available/)).toBeVisible();
   await expect(page.getByText(/Abstract heading not detected/)).toBeVisible();
   expired = true;
-  await page.getByRole("button", { name: "Download PDF", exact: true }).click();
+  await page.getByText("Report details and evidence", { exact: true }).click();
+  await page.getByRole("button", { name: "Download evidence JSON", exact: true }).click();
   await expect(page.getByRole("alert")).toContainText("workspace expired");
   await expect(page.getByLabel("Email address")).toBeVisible();
   await expect(page.getByRole("heading", { name: "Comparison report", exact: true })).toHaveCount(0);
