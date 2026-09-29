@@ -141,7 +141,8 @@ export default function PublicApp() {
         sources: sources.map(file => [file.name, file.size, file.lastModified]) });
       if (submission.current?.fingerprint !== fingerprint) submission.current = { key: crypto.randomUUID(), fingerprint };
       const created = await (await request("/jobs", { method: "POST", body: form, headers: { "Idempotency-Key": submission.current.key } })).json();
-      setStartedAt(Date.now()); setJob(created);
+      const current = created.status === "running" ? created : await (await request(`/jobs/${created.id}`)).json();
+      setStartedAt(Date.now()); setJob(current);
     } catch (e) { setError((e as Error).message); }
     finally { setBusy(false); }
   }
