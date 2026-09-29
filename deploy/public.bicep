@@ -12,6 +12,10 @@ param publicIngress bool = false
 @allowed([0, 1])
 @description('Use 1 only during bounded private runtime validation; restore 0 before release or when blocked.')
 param minimumReplicas int = 0
+@description('Empty only for legacy anonymous preview. All three team fields must be supplied together.')
+param teamTenantId string = ''
+param teamClientId string = ''
+param teamOwnerObjectId string = ''
 
 resource environment 'Microsoft.App/managedEnvironments@2024-03-01' existing = {
   name: environmentName
@@ -44,6 +48,9 @@ resource application 'Microsoft.App/containerApps@2024-03-01' = {
         env: [
           { name: 'BUNA_PUBLIC_ORIGIN', value: frontendOrigin }
           { name: 'BUNA_PUBLIC_HOSTS', value: '${appName}.${environment.properties.defaultDomain},${appName}.internal.${environment.properties.defaultDomain},localhost,127.0.0.1' }
+          { name: 'BUNA_TEAM_TENANT', value: teamTenantId }
+          { name: 'BUNA_TEAM_CLIENT', value: teamClientId }
+          { name: 'BUNA_TEAM_OWNER_OID', value: teamOwnerObjectId }
         ]
         probes: [{
           type: 'Readiness'

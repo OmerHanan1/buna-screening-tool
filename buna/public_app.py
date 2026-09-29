@@ -22,8 +22,10 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from starlette.middleware.trustedhost import TrustedHostMiddleware
+from starlette.concurrency import run_in_threadpool
 
 from buna.public_corpus import load_corpus
+from buna.team_auth import TeamConfig, TeamAuthenticator
 
 RETENTION = 3600
 BODY_LIMIT = 32 * 1024 * 1024
@@ -57,9 +59,18 @@ class PublicBodyLimit:
 
 
 def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None = None,
-                      *, worker_runner=None) -> FastAPI:
+                      *, worker_runner=None, team_authenticator=None) -> FastAPI:
     corpus_root = (corpus_root or Path(os.environ["BUNA_PUBLIC_CORPUS"])).resolve()
-    papers = load_corpus(corpus_root)
+    team_config = TeamConfig.from_environment()
+    team_auth = team_authenticator or (TeamAuthenticator(team_config) if team_config else None)
+    private_manifest_sha = os.environ.get("BUNA_TEAM_CORPUS_SHA", "")
+    if private_manifest_sha:
+        if not team_config:
+            raise RuntimeError("Private corpus requires complete team authentication configuration.")
+        from buna.team_corpus import load_team_corpus
+        papers = load_team_corpus(corpus_root, private_manifest_sha, team_config.tenant, team_config.owner_oid)
+    else:
+        papers = load_corpus(corpus_root)
     origin = os.environ.get("BUNA_PUBLIC_ORIGIN", "")
     hosts = os.environ.get("BUNA_PUBLIC_HOSTS", "localhost,127.0.0.1,testserver").split(",")
     if worker_runner is None and (sys.platform != "linux" or os.geteuid() != 0 or not origin.startswith("https://")):
@@ -133,6 +144,8 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=hosts)
 
     def session(request):
+        if team_auth:
+            return getattr(request.state, "team_owner", None) or team_auth.authenticate(request.headers.get("authorization", ""))
         authorization = request.headers.get("authorization", "")
         if not authorization.startswith("Bearer ") or len(authorization) > 128:
             raise HTTPException(401, "Anonymous session required.")
@@ -170,6 +183,15 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
         supplied_origin = request.headers.get("origin")
         if supplied_origin and supplied_origin != origin:
             return JSONResponse({"detail": "Origin not permitted."}, 403)
+        if team_auth and request.url.path.startswith("/api/") and request.url.path != "/api/auth/config" and request.method != "OPTIONS":
+            try:
+                request.state.team_owner = await run_in_threadpool(team_auth.authenticate, request.headers.get("authorization", ""))
+            except HTTPException as exc:
+                headers = {"Cache-Control": "no-store"}
+                if supplied_origin == origin:
+                    headers.update({"Access-Control-Allow-Origin": origin, "Vary": "Origin"})
+                return JSONResponse({"detail": exc.detail}, exc.status_code,
+                                    headers=headers)
         response = await call_next(request)
         response.headers["Cache-Control"] = "no-store"
         response.headers["X-Content-Type-Options"] = "nosniff"
@@ -179,10 +201,16 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
 
     @app.get("/health")
     def health():
-        return {"status": "ok", "mode": "public-isolated", "engine": "2.5.3", "pdf_renderer": "5"}
+        return {"status": "ok", "mode": "team-restricted" if team_auth else "public-isolated", "engine": "2.5.3", "pdf_renderer": "5"}
+
+    @app.get("/api/auth/config")
+    def auth_config():
+        return team_auth.config.public() if team_auth else {"mode": "anonymous"}
 
     @app.post("/api/public/session")
     def new_session():
+        if team_auth:
+            raise HTTPException(405, "Anonymous sessions are disabled; use Microsoft sign-in.")
         cleanup()
         token = secrets.token_urlsafe(32)
         with lock, connect() as db:
@@ -325,8 +353,10 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
                     sources.append({"path": name, "title": Path(upload.filename or "Source").name[:255]})
                 if not sources:
                     raise HTTPException(422, "Select or upload at least one comparison paper.")
+                attribution_fields = ("title", "attribution", "version", "license", "license_url", "source_url")
                 value = {"target": target_name, "title": Path(target.filename or "Manuscript").name[:255],
-                         "sources": sources, "attributions": [approved[i] for i in selected]}
+                         "sources": sources, "attributions": [{key: approved[i][key] for key in attribution_fields} for i in selected],
+                         "reports_only": team_auth is not None}
                 (folder / "request.json").write_text(json.dumps(value))
             if not worker_runner:
                 os.chown(folder, uid, uid)

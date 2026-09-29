@@ -49,6 +49,32 @@ def isolate(uid: int) -> None:
         seccomp.seccomp_release(context)
 
 
+def source_excerpts_only(report: dict) -> None:
+    """Keep complete matched passages, excluding unrelated source context only."""
+    for match in report["matches"]:
+        source = match.get("source") or {}
+        text = source.get("text", "")
+        original_start = source.get("start", 0)
+        start = max(0, source.get("match_start", original_start) - original_start)
+        end = min(len(text), source.get("match_end", original_start + len(text)) - original_start)
+        if not 0 <= start <= end <= len(text):
+            raise ValueError("Saved source excerpt bounds are invalid.")
+        excerpt = text[start:end]
+        for field in ("highlights", "scored_highlights"):
+            if field in source:
+                source[field] = [[max(a, start) - start, min(b, end) - start]
+                                 for a, b in source[field] if max(a, start) < min(b, end)]
+        source.update(text=excerpt, start=original_start + start,
+                      end=original_start + start + len(excerpt),
+                      match_start=original_start + start,
+                      match_end=original_start + start + len(excerpt))
+    report["evidence_export"] = {
+        "policy": "team-reports-only-v1",
+        "notice": "Reports include complete saved matched source passages, not a full comparison-source appendix. Matching scores and counts are unchanged.",
+    }
+    report["warnings"].append(report["evidence_export"]["notice"])
+
+
 def main():
     folder = Path(sys.argv[1])
     isolate(int(sys.argv[2]))
@@ -70,6 +96,8 @@ def main():
     if not sources:
         raise ValueError("At least one readable comparison source is required.")
     report = compare_documents(target, sources, exclude_quotes=True)
+    if request.get("reports_only"):
+        source_excerpts_only(report)
     checked = {row["source_id"]: row for row in report["source_coverage"]}
     papers = []
     for source in sources:
