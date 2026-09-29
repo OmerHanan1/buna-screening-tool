@@ -30,7 +30,7 @@ from starlette.concurrency import run_in_threadpool
 
 from buna.public_corpus import load_corpus
 from buna.team_auth import TeamConfig, TeamAuthenticator
-from buna.hosted_runtime import WALL_SECONDS, ERRORS, read_artifact, safe_progress
+from buna.hosted_runtime import WALL_SECONDS, ERRORS, read_artifact, safe_progress, job_storage_bytes
 
 RETENTION = 3600
 BODY_LIMIT = 32 * 1024 * 1024
@@ -289,6 +289,7 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
         status = "failed"
         started = time.monotonic()
         diagnostic = {"code": "worker-error", "stage": "starting"}
+        operation = "launch-worker"
         def save_diagnostic():
             diagnostic.update(safe_progress(folder))
             diagnostic["elapsed_seconds"] = round(time.monotonic() - started, 1)
@@ -310,6 +311,7 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
                     deadline = time.monotonic() + WALL_SECONDS
                     last_progress = 0
                     while process.poll() is None:
+                        operation = "monitor-worker-resources"
                         try:
                             cpu = monitor.cpu_times()
                             diagnostic["cpu_seconds"] = round(cpu.user + cpu.system, 1)
@@ -319,15 +321,18 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
                         if time.monotonic() > deadline:
                             diagnostic["code"] = "wall-limit"
                             raise RuntimeError("Worker time limit.")
-                        size = sum(p.lstat().st_size for p in folder.rglob("*") if not p.is_symlink())
+                        operation = "monitor-job-storage"
+                        size = job_storage_bytes(folder)
                         if size > 256 * 1024 * 1024:
                             diagnostic["code"] = "storage-limit"
                             raise RuntimeError("Worker storage limit.")
                         if time.monotonic() - last_progress >= 2:
+                            operation = "persist-progress"
                             save_diagnostic()
                             last_progress = time.monotonic()
                         time.sleep(.1)
                     code = process.returncode
+                    operation = "worker-exit"
                     diagnostic["exit_code"] = code
                     if code:
                         diagnostic["code"] = "worker-signal" if code < 0 else "worker-error"
@@ -344,6 +349,7 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
                         os.killpg(process.pid, signal.SIGKILL)
                     except ProcessLookupError:
                         pass
+            operation = "collect-report"
             summary = json.loads(read_artifact(folder, "complete.json", 256 * 1024))
             if not isinstance(summary, dict):
                 raise RuntimeError("Invalid result metadata.")
@@ -359,8 +365,12 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
             (destination / "report.pdf").write_bytes(pdf)
             (destination / "report.json").write_bytes(evidence)
             status = "complete"
-        except Exception:
+        except Exception as exc:
             status = "failed"
+            diagnostic["supervisor_exception"] = type(exc).__name__
+            diagnostic["supervisor_operation"] = operation
+            if operation.startswith("monitor-") and diagnostic["code"] == "worker-error":
+                diagnostic["code"] = "supervisor-monitor-error"
             try:
                 summary = json.loads(read_artifact(folder, "comparison-complete.json", 256 * 1024))
                 evidence = read_artifact(folder, "report.json", 64 * 1024 * 1024)

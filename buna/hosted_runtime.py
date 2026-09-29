@@ -20,6 +20,7 @@ ERRORS = {
     "storage-limit": "Processing reached the temporary output-size limit.",
     "worker-signal": "The isolated worker stopped unexpectedly. Any completed evidence is retained below.",
     "worker-error": "Processing failed unexpectedly. The reference code identifies privacy-safe diagnostic details.",
+    "supervisor-monitor-error": "The service could not safely monitor this comparison. No automatic retry was started; the reference code identifies the failure.",
     "pdf-error": "Comparison evidence was completed, but the PDF could not be generated. Download the evidence JSON.",
 }
 
@@ -55,3 +56,18 @@ def safe_progress(folder: Path) -> dict:
         if isinstance(value, int) and 0 <= value <= 10_000_000:
             result[key] = value
     return result
+
+
+def job_storage_bytes(folder: Path) -> int:
+    """Measure a live directory without treating atomic replacement as failure."""
+    total = 0
+    for path in folder.rglob("*"):
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            # The worker publishes progress/evidence by atomic rename. The next
+            # sample sees the replacement; never follow a substituted symlink.
+            continue
+        if not stat.S_ISLNK(info.st_mode):
+            total += info.st_size
+    return total
