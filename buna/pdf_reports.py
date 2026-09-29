@@ -21,7 +21,7 @@ import pymupdf as fitz
 from buna.result_state import result_state
 from buna.reports import _THEME
 
-PDF_RENDERER_VERSION = "5"
+PDF_RENDERER_VERSION = "6"
 _LOCK = threading.Lock()
 def _theme(name: str) -> str:
     match = re.search(rf"--cp-{re.escape(name)}:\s*(#[0-9a-fA-F]{{6}})", _THEME)
@@ -137,7 +137,7 @@ def _regions(report: dict, text: str) -> tuple[list[dict], list[dict]]:
     return regions, failures
 
 
-def _sequences(report: dict, text: str) -> tuple[list[dict], list[dict]]:
+def _sequences(report: dict, text: str, *, link_overlaps: bool = True) -> tuple[list[dict], list[dict]]:
     groups = {}
     failures = []
     for index, match in enumerate(report.get("matches", [])):
@@ -169,7 +169,7 @@ def _sequences(report: dict, text: str) -> tuple[list[dict], list[dict]]:
         group["matches"].append(match)
         group["sources"].add(str(match["source_id"]))
     sequences = sorted(groups.values(), key=lambda group: group["spans"])
-    for i, sequence in enumerate(sequences):
+    for i, sequence in enumerate(sequences if link_overlaps else []):
         for other in sequences[i + 1:]:
             if other["spans"][0][0] >= sequence["spans"][-1][1]:
                 break
@@ -177,6 +177,33 @@ def _sequences(report: dict, text: str) -> tuple[list[dict], list[dict]]:
                 sequence.setdefault("overlapping_matches", []).extend(other["matches"])
                 other.setdefault("overlapping_matches", []).extend(sequence["matches"])
     return sequences, failures
+
+
+def _classified_sequences(report: dict, text: str) -> tuple[list[dict], list[dict]]:
+    """One visual layer per original character span, with exact precedence."""
+    original, failures = _sequences(report, text, link_overlaps=False)
+    events = defaultdict(Counter)
+    for index, sequence in enumerate(original):
+        for start, end in sequence["spans"]:
+            events[start][index] += 1
+            events[end][index] -= 1
+    active, previous, groups = Counter(), None, {}
+    for point in sorted(events):
+        indices = tuple(sorted(index for index, count in active.items() if count > 0))
+        if indices and previous is not None and point > previous:
+            matches = [match for index in indices for match in original[index]["matches"]]
+            kind = "exact" if any(match.get("match_kind") == "exact" for match in matches) else "similar"
+            key = kind, indices
+            group = groups.setdefault(key, {"spans": [], "matches": matches,
+                                            "sources": {str(match["source_id"]) for match in matches},
+                                            "visual_kind": kind})
+            if group["spans"] and group["spans"][-1][1] == previous:
+                group["spans"][-1] = group["spans"][-1][0], point
+            else:
+                group["spans"].append((previous, point))
+        active.update(events[point])
+        previous = point
+    return sorted(groups.values(), key=lambda group: group["spans"]), failures
 
 
 def _sequence_comments(sequence: dict, numbers: dict[str, int]) -> list[str]:
@@ -187,7 +214,7 @@ def _sequence_comments(sequence: dict, numbers: dict[str, int]) -> list[str]:
                         key=lambda m: (numbers.get(str(m["source_id"]), 0), m.get("source", {}).get("start", 0))):
         sid = str(match["source_id"])
         passage = match.get("source") or {}
-        key = (sid, passage.get("start"), passage.get("end"), passage.get("text", ""))
+        key = (sid, passage.get("start"), passage.get("end"), passage.get("text", ""), match.get("match_kind"))
         if key in seen:
             continue
         seen.add(key)
@@ -295,7 +322,11 @@ def generate_pdf(payload: dict, destination: Path) -> dict:
     report, job = payload["report"], payload["job"]
     pages = report.get("manuscript_pages") or job["document"]["pages"]
     text = "\n\n".join(page["text"] for page in pages)
-    sequences, failures = _sequences(report, text)
+    classified = (report.get("comparison_model") == "classified-v1.1"
+                  and isinstance(report.get("classification"), dict)
+                  and all(match.get("match_kind") in {"exact", "similar"} for match in report.get("matches", [])
+                          if not match.get("excluded_from_score")))
+    sequences, failures = _classified_sequences(report, text) if classified else _sequences(report, text)
     original = Path(payload["original"]) if payload.get("original") else None
     mode = "original-pdf"
     warning = ""
@@ -326,6 +357,7 @@ def generate_pdf(payload: dict, destination: Path) -> dict:
     mapped = annotations = 0
     methods = Counter()
     line_labels = defaultdict(set)
+    line_kinds = defaultdict(lambda: defaultdict(set))
     sequence_quads = defaultdict(lambda: defaultdict(list))
     page_glyph_bounds = defaultdict(list)
     offsets, offset = [], 0
@@ -352,6 +384,9 @@ def generate_pdf(payload: dict, destination: Path) -> dict:
                     glyph = glyphs[index]
                     sequence_quads[sequence_index][glyph["page"]].append(glyph["quad"])
                     line_labels[(glyph["page"], round(glyph["line"][1] / 4) * 4)].update(sequence["sources"])
+                    if classified:
+                        for match in sequence["matches"]:
+                            line_kinds[(glyph["page"], round(glyph["line"][1] / 4) * 4)][str(match["source_id"])].add(match["match_kind"])
     linked_comments = 0
     continuations = {}
     for sequence_index, by_page in sequence_quads.items():
@@ -366,11 +401,23 @@ def generate_pdf(payload: dict, destination: Path) -> dict:
             pdf_page = manuscript[page_index]
             unique = list({tuple(quad): quad for quad in quads}.values())
             annotation = pdf_page.add_highlight_annot(unique)
-            annotation.set_colors(stroke=_color("accent")); annotation.set_opacity(.18)
+            annotation.set_colors(stroke=_color("warning" if sequence.get("visual_kind") == "similar" else "accent"))
+            annotation.set_opacity(.24 if sequence.get("visual_kind") == "similar" else .18)
             subject = f"Matched sequence {sequence_index + 1}"
+            kinds = {match.get("match_kind") for match in sequence["matches"] + sequence.get("overlapping_matches", [])}
+            if kinds <= {"exact", "similar"} and kinds:
+                subject += " · " + ("Exact / similar wording" if len(kinds) > 1 else "Exact" if "exact" in kinds else "Similar wording")
             if len(comments) > 1:
                 subject += f" · source passage part 1/{len(comments)}"
-            annotation.set_info(title=label, subject=subject, content=comments[0])
+            title = label
+            if classified:
+                source_kinds = defaultdict(set)
+                for match in sequence["matches"]:
+                    source_kinds[str(match["source_id"])].add(match["match_kind"])
+                title = "; ".join(f"{'Exact overlap' if kind == 'exact' else 'Similar wording'} · #{numbers.get(sid, sid)}"
+                                  for sid in sorted(source_kinds, key=lambda sid: numbers.get(sid, 0))
+                                  for kind in sorted(source_kinds[sid]))
+            annotation.set_info(title=title, subject=subject, content=comments[0])
             annotation.update()
             annotations += 1
             continuations[(page_index, sequence_index + 1)] = comments[1:]
@@ -378,6 +425,9 @@ def generate_pdf(payload: dict, destination: Path) -> dict:
     for (page_index, y), source_ids in line_labels.items():
         page = manuscript[page_index]
         labels = ",".join(str(numbers.get(sid, sid)) for sid in sorted(source_ids, key=lambda sid: numbers.get(sid, 0)))
+        if classified:
+            labels = " ".join("/".join("E" if kind == "exact" else "S" for kind in sorted(line_kinds[(page_index, y)][sid]))
+                              + str(numbers.get(sid, sid)) for sid in sorted(source_ids, key=lambda sid: numbers.get(sid, 0)))
         rect = fitz.Rect(3, max(0, y), 34, min(page.rect.height, y + 11))
         if len(labels) > 14 or any(rect.intersects(bound) for bound in page_glyph_bounds[page_index]):
             omitted_labels += 1
@@ -387,6 +437,13 @@ def generate_pdf(payload: dict, destination: Path) -> dict:
     metrics = report.get("metrics", {})
     denominator = metrics.get("score_denominator_words", metrics.get("eligible_words", 0))
     body = f"<h1>Paper Overlap Detector</h1><p><b>{html.escape(str(job.get('filename') or job.get('title', 'Your paper')))}</b></p>"
+    if classified:
+        counts = (report.get("classification") or {}).get("metrics") or {}
+        body += "<p class='warn'>Experimental exact + similar wording model. Scores may differ; accuracy and vendor equivalence are not established.</p>"
+        body += (f"<p><b>E · Exact overlap</b>: {int(counts.get('exact_words', 0))} words · "
+                 f"<b>S · Similar wording</b> only: {int(counts.get('similar_only_words', 0))} words · "
+                 f"Combined: {int(counts.get('combined_words', 0))} unique words.</p>")
+        body += "<p class='muted'>Exact: contiguous equal normalized words. Similar: shared wording with bounded edits or reordering. Exact takes visual precedence; comments retain source alternatives. E/S marks remain usable in grayscale.</p>"
     body += _summary_table(report, numbers, names)
     basis = {"all-submitted-word-units": "total submitted word units",
              "abstract-onward-word-units": "words from the Abstract onward"}.get(metrics.get("score_basis"), "eligible words (saved legacy basis)")
@@ -402,6 +459,14 @@ def generate_pdf(payload: dict, destination: Path) -> dict:
         body += "<p class='warn'>Partial comparison: overlap is a lower bound; not all source passages were checked.</p>"
     if report.get("comparison_model") == "experimental-ordered":
         body += "<p class='warn'>Experimental comparison model: accuracy and vendor equivalence are not established.</p>"
+    if report.get("comparison_model") == "classified-v1.1" and not classified:
+        body += "<p class='warn'>Exact/similar classification data is unavailable in this saved report. Existing evidence is shown without inferred match-type labels.</p>"
+    if classified:
+        counts = (report.get("classification") or {}).get("metrics") or {}
+        if counts.get("all_sources_fully_checked"):
+            body += f"<p>{int(counts.get('unmatched_words', 0))} eligible words had no match found by this model in the checked sources—not a finding of originality.</p>"
+        else:
+            body += "<p>Unmarked eligible text is not fully checked because the source coverage is incomplete; it must not be described as unmatched or original.</p>"
     body += "<p>Original manuscript pages follow." if mode == "original-pdf" else "<p>The following pages are typeset from saved text."
     body += " Highlights reference the numbered papers above. For a readable side panel, open the PDF in Adobe Acrobat Reader and open Comments. Browser PDF viewers may not show comments or may clip popups. Long passages continue in linked replies. Selected comparison papers only; not a plagiarism verdict.</p>"
     if warning:
@@ -412,6 +477,13 @@ def generate_pdf(payload: dict, destination: Path) -> dict:
     if omitted_labels:
         body += f"<p class='muted'>{omitted_labels} lines had no unobstructed margin for a number. Their PDF highlight notes still identify the papers.</p>"
     summary = _typeset(body)
+    if classified:
+        for phrase, color, opacity in (("E · Exact overlap", "accent", .18), ("S · Similar wording", "warning", .24)):
+            for page in summary:
+                found = page.search_for(phrase)
+                if found:
+                    page.draw_rect(found[0], color=None, fill=_color(color), fill_opacity=opacity, overlay=False)
+                    break
     output = fitz.open()
     output.insert_pdf(summary)
     prefix_pages = summary.page_count

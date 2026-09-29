@@ -145,19 +145,29 @@ def main():
         nonlocal last_progress
         if time.monotonic() - last_progress < .5:
             return
-        numbers = re.search(r"source (\d+)/(\d+): window (\d+)/(\d+)", message)
-        if numbers:
-            index, total, visited, windows = map(int, numbers.groups())
-            progress("compare", source_index=index, source_count=total,
-                     source_windows_visited=visited, source_windows_total=windows)
+        source_numbers = re.search(r"source (\d+)/(\d+)", message)
+        if source_numbers:
+            index, total = map(int, source_numbers.groups())
+            windows = re.search(r"window (\d+)/(\d+)", message)
+            counts = dict(zip(("source_windows_visited", "source_windows_total"), map(int, windows.groups()))) if windows else {}
+            progress("compare", source_index=index, source_count=total, **counts)
             last_progress = time.monotonic()
     def source_done(row, matches):
         state["processed_sources"] += 1
         state["checked_sources"] += int(row["status"] == "compared")
         progress("compare")
-    report = compare_documents(target, sources, exclude_quotes=True, load_document=load_document,
-                               progress=comparison_progress, source_done=source_done,
-                               total_time_limit_seconds=COMPARISON_SECONDS)
+    model = request.get("comparison_model", "validated-lexical")
+    if model == "classified-v1.1":
+        from buna.classified import classify_report
+        report = classify_report(target, sources, exclude_quotes=True, load_document=load_document,
+                                 progress=comparison_progress, source_progress=lambda row: source_done(row, []),
+                                 total_time_limit_seconds=COMPARISON_SECONDS)
+    elif model == "validated-lexical":
+        report = compare_documents(target, sources, exclude_quotes=True, load_document=load_document,
+                                   progress=comparison_progress, source_done=source_done,
+                                   total_time_limit_seconds=COMPARISON_SECONDS)
+    else:
+        raise ValueError("Unsupported comparison model.")
     if request.get("reports_only"):
         source_excerpts_only(report)
     checked = {row["source_id"]: row for row in report["source_coverage"]}
@@ -179,9 +189,13 @@ def main():
         "overlap_percent": report["metrics"]["overlap_percent"],
         "checked": sum(row.get("status") == "compared" for row in checked.values()),
         "total": len(sources), "warnings": report["warnings"],
-        "partial": any(row.get("status") != "compared" for row in checked.values()),
+        "partial": outcome["state"] == "partial" or outcome["score_kind"] == "lower_bound",
         "algorithm_version": report["algorithm_version"], "score_available": outcome["score_available"],
+        "comparison_model": model,
     }
+    if report.get("classification"):
+        summary["classification_counts"] = {key: report["classification"]["metrics"][key] for key in
+            ("exact_words", "similar_only_words", "unmatched_words", "not_fully_checked_words")}
     progress("write-evidence")
     Path("report.json").write_text(json.dumps(report, ensure_ascii=False))
     atomic_json(Path("comparison-complete.json"), summary)

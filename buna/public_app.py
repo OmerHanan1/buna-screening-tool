@@ -31,6 +31,7 @@ from starlette.concurrency import run_in_threadpool
 from buna.public_corpus import load_corpus
 from buna.team_auth import TeamConfig, TeamAuthenticator
 from buna.hosted_runtime import WALL_SECONDS, ERRORS, read_artifact, safe_progress, job_storage_bytes
+from buna.pdf_reports import PDF_RENDERER_VERSION
 
 RETENTION = 3600
 BODY_LIMIT = 32 * 1024 * 1024
@@ -246,7 +247,7 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
     @app.get("/health")
     def health():
         return {"status": "ok", "mode": "email-gate" if email_gate else "team-restricted" if team_auth else "public-isolated",
-                "engine": "2.5.3", "pdf_renderer": "5", "runtime": "cached-corpus-v1"}
+                "engine": "2.5.3", "pdf_renderer": PDF_RENDERER_VERSION, "runtime": "cached-corpus-v1"}
 
     @app.get("/api/auth/config")
     def auth_config():
@@ -354,7 +355,8 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
             if not isinstance(summary, dict):
                 raise RuntimeError("Invalid result metadata.")
             public_summary = {k: summary[k] for k in ("checked", "total", "overlap_percent", "partial",
-                              "warnings", "algorithm_version", "score_available") if k in summary}
+                              "warnings", "algorithm_version", "score_available", "comparison_model",
+                              "classification_counts") if k in summary}
             pdf = read_artifact(folder, "report.pdf", 64 * 1024 * 1024)
             evidence = read_artifact(folder, "report.json", 64 * 1024 * 1024)
             if not pdf.startswith(b"%PDF-"):
@@ -380,7 +382,8 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
                 destination.mkdir(mode=0o700, exist_ok=True)
                 (destination / "complete.json").write_text(json.dumps({
                     key: summary[key] for key in ("checked", "total", "overlap_percent", "partial", "warnings",
-                                                 "algorithm_version", "score_available") if key in summary
+                                                 "algorithm_version", "score_available", "comparison_model",
+                                                 "classification_counts") if key in summary
                 }))
                 (destination / "report.json").write_bytes(evidence)
                 diagnostic["code"] = "pdf-error"
@@ -433,6 +436,9 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
             folder.mkdir(mode=0o700)
             async with request.form(max_files=6, max_fields=2, max_part_size=4096) as form:
                 selected = json.loads(str(form.get("selected", "[]")))
+                model = str(form.get("comparison_model", "validated-lexical"))
+                if model not in {"validated-lexical", "classified-v1.1"}:
+                    raise HTTPException(422, "Select a supported comparison model.")
                 if not isinstance(selected, list) or not all(isinstance(i, str) for i in selected) or len(selected) != len(set(selected)):
                     raise HTTPException(422, "Invalid corpus selection.")
                 approved = {p["sha256"]: p for p in papers}
@@ -482,7 +488,7 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
                 attribution_fields = ("title", "attribution", "version", "license", "license_url", "source_url")
                 value = {"target": target_name, "title": Path(target.filename or "Manuscript").name[:255],
                          "sources": sources, "attributions": [{key: approved[i][key] for key in attribution_fields} for i in selected],
-                         "reports_only": team_auth is not None or email_gate}
+                         "reports_only": team_auth is not None or email_gate, "comparison_model": model}
                 (folder / "request.json").write_text(json.dumps(value))
             if not worker_runner:
                 os.chown(folder, uid, uid)

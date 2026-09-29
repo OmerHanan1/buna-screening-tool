@@ -154,3 +154,29 @@ def test_expired_results_removed_and_uids_never_reused(tmp_path, monkeypatch):
         c.post("/api/public/session").raise_for_status()
         runtime = next(tmp_path.glob("public-runtime-*"))
         assert not (runtime / second.rsplit("/", 1)[-1]).exists()
+
+
+def test_comparison_model_is_explicit_and_standard_by_default(tmp_path):
+    root, paper = corpus(tmp_path)
+    models = []
+    def record_worker(folder, uid):
+        models.append(json.loads((folder / "request.json").read_text())["comparison_model"])
+        worker(folder, uid)
+    with TestClient(create_public_app(root, tmp_path, worker_runner=record_worker)) as client:
+        owner = {"Authorization": "Bearer " + client.post("/api/public/session").json()["token"]}
+        for model in [None, "classified-v1.1", "unknown-model"]:
+            fields = {"selected": json.dumps([paper["sha256"]])}
+            if model is not None:
+                fields["comparison_model"] = model
+            response = client.post("/api/public/jobs", headers=owner, data=fields,
+                                   files={"target": ("synthetic.txt", b"original synthetic test")})
+            if model == "unknown-model":
+                assert response.status_code == 422
+                continue
+            assert response.status_code == 202, response.text
+            path = "/api/public/jobs/" + response.json()["id"]
+            for _ in range(100):
+                if client.get(path, headers=owner).json()["status"] != "running":
+                    break
+                time.sleep(.01)
+        assert models == ["validated-lexical", "classified-v1.1"]

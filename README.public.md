@@ -35,6 +35,13 @@ default library. Results offer **Open PDF** and **Download PDF**; methodology,
 privacy details and source credits are kept in secondary disclosures. File
 validation, incomplete results and expired-session errors remain visible.
 
+An optional **Advanced → Exact + similar wording (experimental)** model separates
+contiguous exact wording from bounded edits/reordering. Experimental PDFs use
+rose **E** and amber **S** markers with source-numbered annotation titles; color
+is not the only cue. The standard model remains the default. Scores and
+normalization can differ, and no superiority or vendor-equivalence claim is made.
+See [the model and limitations](docs/experimental-wording.md).
+
 ## Code and deployment
 
 * `buna/public_app.py`: isolated anonymous public API; it never serves the local store.

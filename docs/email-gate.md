@@ -108,3 +108,10 @@ at the full 780-second bound would be about 65 active hours/month while the quot
 store persists, within the documented 100-hour estimate. Quotas reset when the
 ephemeral service restarts, and traffic can still incur charges; budget alerts
 remain notifications rather than a hard spending cap.
+
+The supervisor's storage scan tolerates a file disappearing during an atomic
+progress/evidence replacement. It does not follow symlinks or suppress permission
+and I/O errors, and the existing storage quota remains enforced on each sample.
+Unexpected supervisor failures record only the exception class and operation
+alongside the job's safe diagnostics; raw exception text and document contents
+are not exposed.

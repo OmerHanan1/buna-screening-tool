@@ -4,7 +4,7 @@ import PdfActions from "./PdfActions";
 import { Elapsed, fileSize, ManuscriptInput, PaperDialog, validateFile, type HostedPaper } from "./PublicControls";
 import "./public.css";
 
-type Job = { id: string; status: string; checked?: number; total?: number; overlap_percent?: number; score_available?: boolean; partial?: boolean; warnings?: string[]; error?: string; algorithm_version?: string; error_code?: string; diagnostic_id?: string; evidence_available?: boolean; progress?: { stage?: string; source_index?: number; source_count?: number; checked_sources?: number; elapsed_seconds?: number } };
+type Job = { id: string; status: string; checked?: number; total?: number; overlap_percent?: number; score_available?: boolean; partial?: boolean; warnings?: string[]; error?: string; algorithm_version?: string; comparison_model?: string; classification_counts?: { exact_words: number; similar_only_words: number; unmatched_words: number; not_fully_checked_words: number }; error_code?: string; diagnostic_id?: string; evidence_available?: boolean; progress?: { stage?: string; source_index?: number; source_count?: number; checked_sources?: number; elapsed_seconds?: number } };
 const base = (import.meta.env.VITE_PUBLIC_API_URL || "").replace(/\/$/, "");
 const gatedMode = import.meta.env.VITE_EMAIL_GATE === "true";
 
@@ -18,6 +18,7 @@ export default function PublicApp() {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [consent, setConsent] = useState(false);
+  const [model, setModel] = useState("validated-lexical");
   const [loadingLibrary, setLoadingLibrary] = useState(true);
   const [entered, setEntered] = useState(false);
   const [email, setEmail] = useState("");
@@ -44,6 +45,7 @@ export default function PublicApp() {
       const data = await response.json().catch(() => ({}));
       if (response.status === 401) {
         setEntered(false); token.current = ""; setJob(null); setPapers([]); setSelected([]);
+        setModel("validated-lexical");
         const message = "This workspace expired or the service restarted. Enter your email to start a new one.";
         setError(message);
         throw new Error(message);
@@ -108,6 +110,7 @@ export default function PublicApp() {
     token.current = ""; setEntered(false); urls.current.forEach(URL.revokeObjectURL); urls.current = [];
     submission.current = null;
     setJob(null); setPapers([]); setSelected([]); setTarget(null); setSources([]); setConsent(false); setError("");
+    setModel("validated-lexical");
   }
   async function chooseTarget(file: File) {
     if (busy) return;
@@ -142,8 +145,9 @@ export default function PublicApp() {
       if (!gatedMode && !token.current) token.current = (await (await request("/session", { method: "POST" })).json()).token;
       const form = new FormData();
       form.append("target", target); form.append("selected", JSON.stringify(selected));
+      form.append("comparison_model", model);
       sources.forEach(file => form.append("sources", file));
-      const fingerprint = JSON.stringify({ target: [target.name, target.size, target.lastModified], selected,
+      const fingerprint = JSON.stringify({ target: [target.name, target.size, target.lastModified], selected, model,
         sources: sources.map(file => [file.name, file.size, file.lastModified]) });
       if (submission.current?.fingerprint !== fingerprint) submission.current = { key: crypto.randomUUID(), fingerprint };
       const created = await (await request("/jobs", { method: "POST", body: form, headers: { "Idempotency-Key": submission.current.key } })).json();
@@ -173,12 +177,13 @@ export default function PublicApp() {
     try {
       const value = await (await request(`/jobs/${job.id}`, { method: "DELETE" })).json();
       setJob(value.status === "deleted" ? null : { ...job, status: value.status });
-      if (value.status === "deleted") submission.current = null;
+      if (value.status === "deleted") { submission.current = null; setModel("validated-lexical"); }
     } catch (e) { setError((e as Error).message); }
   }
   function newComparison() {
     if (!window.confirm("Keep your downloaded report before starting a new comparison. Continue?")) return;
     submission.current = null;
+    setModel("validated-lexical");
     setJob(null); setTarget(null); setSources([]); setConsent(false); setError(""); setFileError(""); setSourceError("");
   }
   const hasAccess = !gatedMode || entered;
@@ -220,6 +225,14 @@ export default function PublicApp() {
               <button className="hosted-text-button" onClick={() => extraInput.current?.click()}><Plus size={15} />Add your own comparison papers</button>
               {sources.map((file, i) => <div className="hosted-extra-file" key={`${file.name}-${i}`}><FileText size={15} aria-hidden="true" /><span title={file.name}>{file.name}</span><small>{fileSize(file.size)}</small><button className="hosted-icon-button" aria-label={`Remove comparison ${file.name}`} onClick={() => setSources(previous => previous.filter((_, index) => index !== i))}><X size={15} /></button></div>)}
               {sourceError && <p role="alert" className="hosted-field-error">{sourceError}</p>}
+              <details className="hosted-model-details"><summary>{model === "classified-v1.1" ? "Advanced · experimental model selected" : "Advanced"}</summary>
+                <label htmlFor="comparison-model">Comparison model</label>
+                <select id="comparison-model" value={model} onChange={e => setModel(e.target.value)}>
+                  <option value="validated-lexical">Standard wording comparison</option>
+                  <option value="classified-v1.1">Exact + similar wording (experimental)</option>
+                </select>
+                {model === "classified-v1.1" && <p>Experimental: separates exact wording from bounded word edits/reordering. Scores can differ; no accuracy or Crossref-equivalence claim.</p>}
+              </details>
             </section>
             <div className="hosted-action-bar"><p id="compare-reason">{busy ? "Uploading your files…" : disabledReason || `Ready to compare against ${selected.length + sources.length} papers.`}</p><button className="hosted-primary" disabled={!!disabledReason || busy} aria-describedby="compare-reason" onClick={compare}>{busy ? "Uploading…" : "Compare papers"}<ArrowRight size={16} aria-hidden="true" /></button></div>
           </fieldset>
@@ -228,6 +241,7 @@ export default function PublicApp() {
         {job && <section aria-live="polite">
           {job.status === "running" ? <div className="hosted-surface hosted-progress"><LoaderCircle size={24} className="hosted-spin" aria-hidden="true" /><h2>Comparing your manuscript</h2><p>{submitted.title} · {submitted.count} comparison papers</p><p>{stages[job.progress?.stage || ""] || "Starting the comparison"}{job.progress?.source_index && ["load-source", "compare"].includes(job.progress?.stage || "") ? ` · paper ${job.progress.source_index} of ${job.progress.source_count || submitted.count}` : ""}</p><p>{job.progress?.checked_sources !== undefined ? `${job.progress.checked_sources} papers fully checked. ` : ""}Large comparisons can take several minutes; you can cancel at any time.</p><div className="hosted-progress-meta"><Elapsed since={startedAt} /><button onClick={remove}>Cancel comparison</button></div>{error && <button onClick={() => setRetryStatus(value => value + 1)}>Retry status</button>}</div>
           : job.status === "complete" ? <>
+            {job.comparison_model === "classified-v1.1" && <p className="hosted-critical">Experimental exact + similar wording report. Scores may differ from the standard model.</p>}
             {job.partial && <p className="hosted-critical">{job.score_available === false ? "Comparison incomplete. No score is available." : "Partial comparison: the overlap is a lower bound."} {job.checked} of {job.total} papers were fully checked.</p>}
             {fallbackWarning && <p className="hosted-critical">{fallbackWarning}</p>}
             <div className="hosted-surface">
@@ -236,7 +250,9 @@ export default function PublicApp() {
               <PdfActions jobId={job.id} load={signal => request(`/jobs/${job.id}/report.pdf`, { signal })} />
             </div>
             <p className="hosted-report-note">Download before refreshing or leaving. For side comments, open the PDF’s Comments panel in Acrobat Reader.</p>
-            <details className="hosted-info"><summary>Report details and evidence</summary><p>Saved engine: {job.algorithm_version || "not recorded"} · Text overlap for review, not a plagiarism verdict. Scores retain the saved comparison basis.</p>{job.warnings?.filter(w => w !== fallbackWarning).map((w, i) => <p key={i}>{w}</p>)}<button onClick={() => reportFile("json")}>Download evidence JSON</button></details>
+            <details className="hosted-info"><summary>Report details and evidence</summary><p>Saved engine: {job.algorithm_version || "not recorded"} · Text overlap for review, not a plagiarism verdict. Scores retain the saved comparison basis.</p>
+              {job.classification_counts && <p>{job.classification_counts.exact_words} exact words · {job.classification_counts.similar_only_words} similar-only words. {job.classification_counts.not_fully_checked_words ? `${job.classification_counts.not_fully_checked_words} words are not fully checked.` : `${job.classification_counts.unmatched_words} eligible words had no match found in the checked sources; this is not a finding of originality.`}</p>}
+              {job.warnings?.filter(w => w !== fallbackWarning).map((w, i) => <p key={i}>{w}</p>)}<button onClick={() => reportFile("json")}>Download evidence JSON</button></details>
             <div className="hosted-bottom-actions"><button onClick={newComparison}>New comparison</button><button className="hosted-text-button" onClick={() => { if (window.confirm("Delete this temporary comparison and its report?")) void remove(); }}>Delete report</button></div>
           </> : <div className="hosted-surface hosted-progress"><h2>{job.status === "cancelled" ? "Comparison cancelled" : job.evidence_available ? "Comparison saved; PDF unavailable" : "Couldn’t finish this comparison"}</h2><p>{job.error || "No report was created."}</p>{job.diagnostic_id && <p className="hosted-report-note">Reference {job.diagnostic_id.slice(0, 8)} · {stages[job.progress?.stage || ""] || "Processing"} · {job.error_code}</p>}<div className="hosted-bottom-actions">{job.evidence_available && <button onClick={() => reportFile("json")}>Download evidence JSON</button>}<button onClick={() => { void remove(); }}>Back to setup</button></div></div>}
         </section>}
