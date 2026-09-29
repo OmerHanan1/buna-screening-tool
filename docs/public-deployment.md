@@ -2,7 +2,9 @@
 
 The public preview is a **separate service**, not the localhost app behind a tunnel.
 It supports a reviewed public corpus, personal PDF/TXT uploads and PDF/JSON reports.
-It intentionally has no DOI importing, shared visitor library or persistent personal history.
+It intentionally has no DOI importing or persistent personal history. Supplementary
+PDFs can optionally be kept in the bounded private [shared library](shared-library.md);
+the checkbox is unchecked by default and never applies to the manuscript.
 The local application and its data are never mounted into the public service.
 
 ## Isolation and retention
@@ -24,7 +26,7 @@ storage using no-follow, regular-file and size checks.
 
 The comparison stage has its own 480-second bound so partial evidence can be
 rendered before the outer worker limits. Source extraction caches are immutable,
-content/parser-version pinned and shared only for the curated corpus.
+content/parser-version pinned for the curated corpus and validated shared sources.
 
 This reduces risk; it is not a promise that untrusted document parsing is perfectly
 safe. Do not submit confidential or sensitive manuscripts. Visitor files/results
@@ -66,7 +68,9 @@ The initial design uses East US Container Apps **Consumption**, 1 vCPU / 2 GiB,
 minimum zero / maximum one replica, no Log Analytics workspace, no dedicated
 profile/private endpoint, and one Basic private container registry. Curated files
 persist in the immutable image; visitor data is ephemeral. ACR pull uses a
-dedicated identity scoped only to that registry.
+dedicated identity scoped to that registry. Optional shared saving additionally
+grants that identity Blob Data Contributor on its single private source container,
+not on the subscription or storage account.
 
 Official retail rates checked for East US:
 
@@ -99,6 +103,10 @@ See [plans](https://learn.microsoft.com/azure/static-web-apps/plans),
 the actual Azure amd64 kernel and complete synthetic upload-to-PDF workflow.
 Only after the security and corpus gates pass should `publicIngress` become true.
 Keep revision mode Single, maximum one replica and all worker safeguards.
+For bounded release validation only, Multiple mode may pin all public traffic to
+the proven revision while a zero-traffic candidate is tested internally. Restore
+Single/minimum-zero operation after checking active work and completing rollout;
+do not leave a warm validation replica running.
 
 ## Release and operations
 
