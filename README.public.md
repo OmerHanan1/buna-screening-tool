@@ -24,9 +24,14 @@ warning explains the whole-manuscript fallback.
 Hosted uploads are isolated by independent random visitor capabilities, expire within one
 hour, and can disappear sooner on restart/scale-down. Download results promptly.
 Do not upload sensitive or confidential manuscripts. This preview does **not**
-offer DOI import, a persistent visitor library or permanent comparison history.
+offer DOI import or permanent private comparison history.
 Comparison source files have no download/full-text endpoint; reports preserve
 complete matched passages without adding the full source documents.
+
+Additional comparison PDFs can optionally be kept in the durable shared library.
+The **Keep in library for future comparisons** checkbox is off by default and
+never applies to the manuscript. Saved papers are available to everyone with app
+access; this is not a private personal library. See [shared storage and limits](docs/shared-library.md).
 
 The hosted workspace starts with all available default papers selected. Use
 **Review papers** to search, deselect or inspect credits, then upload a manuscript

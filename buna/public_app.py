@@ -19,6 +19,7 @@ import time
 import re
 import hmac
 import psutil
+import logging
 from uuid import uuid4, UUID
 
 from fastapi import FastAPI, HTTPException, Request
@@ -37,6 +38,7 @@ RETENTION = 3600
 BODY_LIMIT = 32 * 1024 * 1024
 MAX_JOBS = 10
 MAX_DISK = 768 * 1024 * 1024
+logger = logging.getLogger(__name__)
 
 
 class EmailGateInput(BaseModel):
@@ -69,7 +71,7 @@ class PublicBodyLimit:
 
 
 def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None = None,
-                      *, worker_runner=None, team_authenticator=None) -> FastAPI:
+                      *, worker_runner=None, team_authenticator=None, shared_store=None) -> FastAPI:
     corpus_root = (corpus_root or Path(os.environ["BUNA_PUBLIC_CORPUS"])).resolve()
     access_mode = os.environ.get("BUNA_ACCESS_MODE", "")
     if access_mode not in {"", "anonymous", "team", "email-gate"}:
@@ -100,6 +102,17 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
         papers = load_team_corpus(corpus_root, private_manifest_sha, team_config.tenant, team_config.owner_oid)
     else:
         papers = load_corpus(corpus_root)
+    from buna.shared_library import SharedLibrary, AzureBlobStore, SharedLibraryError, MAX_PARSED_BYTES
+    shared_settings = [os.environ.get(name, "") for name in
+                       ("BUNA_SHARED_ACCOUNT_URL", "BUNA_SHARED_CONTAINER", "BUNA_SHARED_IDENTITY_CLIENT_ID")]
+    if any(shared_settings) and not all(shared_settings):
+        raise RuntimeError("Incomplete shared-library storage configuration.")
+    if shared_store is not None or all(shared_settings):
+        if not (email_gate or team_auth):
+            raise RuntimeError("Shared saving requires an explicitly configured access gate.")
+        shared = SharedLibrary(shared_store or AzureBlobStore(*shared_settings), {p["sha256"] for p in papers})
+    else:
+        shared = None
     origin = os.environ.get("BUNA_PUBLIC_ORIGIN", "")
     hosts = os.environ.get("BUNA_PUBLIC_HOSTS", "localhost,127.0.0.1,testserver").split(",")
     if worker_runner is None and (sys.platform != "linux" or os.geteuid() != 0 or not origin.startswith("https://")):
@@ -111,6 +124,10 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
     os.chmod(root, 0o711)
     results_root = root / "results"
     results_root.mkdir(mode=0o700)
+    save_root = root / "pending-saves"
+    save_root.mkdir(mode=0o700)
+    shared_cache = root / "shared-cache"
+    shared_cache.mkdir(mode=0o711)
     index = root / "index.sqlite3"
     lock = threading.RLock()
     gate = threading.Lock()
@@ -132,6 +149,7 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
         CREATE TABLE identities(id INTEGER PRIMARY KEY AUTOINCREMENT);
         CREATE TABLE diagnostics(job TEXT PRIMARY KEY,data TEXT NOT NULL);
         CREATE TABLE request_keys(owner TEXT NOT NULL,key TEXT NOT NULL,job TEXT NOT NULL,PRIMARY KEY(owner,key));
+        CREATE TABLE library_saves(job TEXT PRIMARY KEY,data TEXT NOT NULL);
         """)
     os.chmod(index, 0o600)
 
@@ -143,9 +161,12 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
                     shutil.rmtree(root / row["id"], ignore_errors=False)
                     if (results_root / row["id"]).exists():
                         shutil.rmtree(results_root / row["id"])
+                    if (save_root / row["id"]).exists():
+                        shutil.rmtree(save_root / row["id"])
                     db.execute("DELETE FROM jobs WHERE id=?", (row["id"],))
                     db.execute("DELETE FROM diagnostics WHERE job=?", (row["id"],))
                     db.execute("DELETE FROM request_keys WHERE job=?", (row["id"],))
+                    db.execute("DELETE FROM library_saves WHERE job=?", (row["id"],))
             db.execute("DELETE FROM sessions WHERE created<?", (time.time() - 4 * RETENTION,))
             db.execute("DELETE FROM submissions WHERE created<?", (time.time() - 86400,))
             now = time.time()
@@ -174,6 +195,7 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
         # Runtime is ephemeral; platform removes it after the process/container exits.
 
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+    app.state.shared_library = shared
     app.add_middleware(PublicBodyLimit)
     app.add_middleware(CORSMiddleware, allow_origins=[origin] if origin else [],
                        allow_methods=["GET", "POST", "DELETE"], allow_headers=["Authorization", "Content-Type", "Idempotency-Key"],
@@ -280,10 +302,62 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
             db.execute("INSERT INTO sessions VALUES(?,?)", (hashlib.sha256(token.encode()).hexdigest(), time.time()))
         return {"token": token}
 
+    def library_snapshot():
+        warning = ""
+        additions = []
+        if shared:
+            try:
+                additions = shared.list()
+            except Exception as exc:
+                logger.warning("Shared catalog unavailable (%s).", type(exc).__name__)
+                warning = "The shared library is temporarily unavailable. Only the curated papers are shown; shared saving is disabled until it reconnects."
+        return papers + additions, warning
+
     @app.get("/api/public/library")
     def library():
-        return {"papers": [{k: p[k] for k in ("sha256", "title", "attribution", "license", "license_url", "source_url", "version")} for p in papers],
-                "retention_seconds": RETENTION}
+        snapshot, warning = library_snapshot()
+        return {"papers": [{k: p[k] for k in ("sha256", "title", "attribution", "license", "license_url", "source_url", "version")} for p in snapshot],
+                "retention_seconds": RETENTION, "shared_saving_available": shared is not None and not warning,
+                "shared_library_warning": warning}
+
+    def persist_shared(job_id):
+        with connect() as db:
+            row = db.execute("SELECT data FROM library_saves WHERE job=?", (job_id,)).fetchone()
+            job = db.execute("SELECT status FROM jobs WHERE id=?", (job_id,)).fetchone()
+        if not row or not shared:
+            return
+        entries = json.loads(row[0])
+        try:
+            validations = json.loads(read_artifact(root / job_id, "share-validation.json", 16384))
+        except (OSError, ValueError):
+            validations = {}
+        if not isinstance(validations, dict):
+            validations = {}
+        for entry in entries:
+            if entry["state"] in {"saved", "already-present", "rejected", "cancelled"}:
+                continue
+            if job is None or job["status"] == "cancelled":
+                entry.update(state="cancelled", reason="The comparison was cancelled; this paper was not saved.")
+            elif not isinstance(validations.get(entry["source_id"]), dict) or validations[entry["source_id"]].get("validated") is not True:
+                entry.update(state="rejected", reason="The source did not pass full-text/shared-save validation. It was not added to the shared library.")
+            else:
+                entry.update(state="saving", reason="")
+                with connect() as db:
+                    db.execute("UPDATE library_saves SET data=? WHERE job=?", (json.dumps(entries), job_id))
+                try:
+                    original = (save_root / job_id / (entry["sha256"] + ".pdf")).read_bytes()
+                    if hashlib.sha256(original).hexdigest() != entry["sha256"]:
+                        raise SharedLibraryError("The retained source fingerprint changed; nothing was saved.")
+                    document = json.loads(read_artifact(root / job_id, "parsed-source-" + entry["source_id"] + ".json", MAX_PARSED_BYTES))
+                    outcome = shared.save(original, document, entry["title"])
+                    entry.update(state=outcome["state"], reason="")
+                except SharedLibraryError as exc:
+                    entry.update(state="failed", reason=str(exc))
+                except Exception as exc:
+                    logger.warning("Shared save not confirmed (%s).", type(exc).__name__)
+                    entry.update(state="failed", reason="Persistent saving could not be confirmed. This file remains usable for this comparison; retry saving later.")
+            with connect() as db:
+                db.execute("UPDATE library_saves SET data=? WHERE job=?", (json.dumps(entries), job_id))
 
     def run_job(job_id, uid):
         folder = root / job_id
@@ -395,6 +469,8 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
                 save_diagnostic()
                 with lock, connect() as db:
                     db.execute("UPDATE jobs SET status=? WHERE id=? AND status='running'", (status, job_id))
+                persist_shared(job_id)
+                with lock:
                     active.pop(job_id, None)
             finally:
                 gate.release()
@@ -434,16 +510,24 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
                 if uid >= 60000:
                     raise HTTPException(503, "Service identity capacity exhausted; maintenance required.")
             folder.mkdir(mode=0o700)
-            async with request.form(max_files=6, max_fields=2, max_part_size=4096) as form:
+            async with request.form(max_files=6, max_fields=4, max_part_size=8192) as form:
                 selected = json.loads(str(form.get("selected", "[]")))
+                keep_indices = json.loads(str(form.get("save_sources", "[]")))
+                if (not isinstance(keep_indices, list) or any(type(i) is not int for i in keep_indices)
+                        or len(keep_indices) != len(set(keep_indices))):
+                    raise HTTPException(422, "Invalid shared-save selection.")
+                if keep_indices and (shared is None or str(form.get("share_authorized", "")) != "true"):
+                    raise HTTPException(422, "Shared saving requires explicit hosted/shared-use authorization and available storage.")
                 model = str(form.get("comparison_model", "validated-lexical"))
                 if model not in {"validated-lexical", "classified-v1.1"}:
                     raise HTTPException(422, "Select a supported comparison model.")
                 if not isinstance(selected, list) or not all(isinstance(i, str) for i in selected) or len(selected) != len(set(selected)):
                     raise HTTPException(422, "Invalid corpus selection.")
-                approved = {p["sha256"]: p for p in papers}
+                snapshot, shared_warning = await run_in_threadpool(library_snapshot)
+                approved = {p["sha256"]: p for p in snapshot}
                 if not all(isinstance(i, str) and i in approved for i in selected):
-                    raise HTTPException(422, "Only approved public corpus papers can be selected.")
+                    raise HTTPException(503 if shared_warning else 422,
+                                        shared_warning or "Only currently available comparison papers can be selected.")
                 target = form.get("target")
                 if not hasattr(target, "read"):
                     raise HTTPException(422, "Upload your manuscript.")
@@ -463,11 +547,28 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
                         raise HTTPException(422, "Empty file.")
                     return file.name
                 target_name = await save(target, "target", 10 * 1024 * 1024)
+                target_digest = hashlib.sha256((folder / target_name).read_bytes()).hexdigest()
                 sources = []
+                selected_ids = {}
+                # No worker is active while admission owns the gate; immutable
+                # source caches from completed jobs can be safely evicted here.
+                for cached in shared_cache.glob("shared-*.json"):
+                    cached.unlink()
+                shared_bytes = 0
                 for digest in selected:
                     paper = approved[digest]
+                    selected_ids[digest] = str(len(sources) + 1)
                     cache = paper.get("parsed_cache")
-                    if cache:
+                    if paper.get("state") == "ready":
+                        shared_bytes += paper["parsed_bytes"]
+                        if shared_bytes > 192 * 1024 * 1024:
+                            raise HTTPException(422, "Selected shared papers exceed the 192 MiB per-comparison cache limit. Deselect some papers.")
+                        try:
+                            sources.append(await run_in_threadpool(shared.materialize, paper, shared_cache))
+                        except Exception as exc:
+                            logger.warning("Shared source unavailable during snapshot (%s).", type(exc).__name__)
+                            sources.append({"title": paper["title"], "path": "", "unavailable_reason": "Shared source could not be loaded; it was not checked."})
+                    elif cache:
                         sources.append({"path": str(corpus_root / paper["filename"]), "title": paper["title"],
                                         "cached_document": str(corpus_root / cache["filename"]),
                                         "cached_sha256": cache["sha256"]})
@@ -478,11 +579,35 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
                 manual = form.getlist("sources")
                 if len(manual) > 5:
                     raise HTTPException(422, "At most five personal comparison files.")
+                if any(i < 0 or i >= len(manual) for i in keep_indices):
+                    raise HTTPException(422, "Only supplementary comparison files can be selected for sharing.")
+                saves = []
                 for i, upload in enumerate(manual):
                     if not hasattr(upload, "read"):
                         raise HTTPException(422, "Invalid source file.")
                     name = await save(upload, f"source-{i}", 8 * 1024 * 1024)
-                    sources.append({"path": name, "title": Path(upload.filename or "Source").name[:255]})
+                    title = Path(upload.filename or "Source").name[:255]
+                    content = (folder / name).read_bytes()
+                    digest = hashlib.sha256(content).hexdigest()
+                    if i in keep_indices and Path(name).suffix != ".pdf":
+                        raise HTTPException(422, "Only supplementary PDFs can be kept in the shared library.")
+                    if digest not in selected_ids:
+                        selected_ids[digest] = str(len(sources) + 1)
+                        sources.append({"path": name, "title": title, "keep_in_library": i in keep_indices})
+                    elif i in keep_indices:
+                        sources[int(selected_ids[digest]) - 1]["keep_in_library"] = True
+                    if i in keep_indices and not any(entry["sha256"] == digest for entry in saves):
+                        state, reason = "pending", ""
+                        if digest == target_digest:
+                            state, reason = "rejected", "This is identical to your manuscript and was not shared."
+                        elif digest in approved:
+                            state = "already-present"
+                        else:
+                            retained = save_root / job_id
+                            retained.mkdir(mode=0o700, exist_ok=True)
+                            (retained / (digest + ".pdf")).write_bytes(content)
+                        saves.append({"source_id": selected_ids[digest], "sha256": digest, "title": title,
+                                      "state": state, "reason": reason})
                 if not sources:
                     raise HTTPException(422, "Select or upload at least one comparison paper.")
                 attribution_fields = ("title", "attribution", "version", "license", "license_url", "source_url")
@@ -501,6 +626,8 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
                 db.execute("INSERT INTO submissions VALUES(?,?)", (created_at, owner))
                 if request_key:
                     db.execute("INSERT INTO request_keys VALUES(?,?,?)", (owner, request_key, job_id))
+                if saves:
+                    db.execute("INSERT INTO library_saves VALUES(?,?)", (job_id, json.dumps(saves)))
                 active[job_id] = None
             thread = threading.Thread(target=run_job, args=(job_id, uid), daemon=True)
             try:
@@ -508,7 +635,7 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
             except RuntimeError as exc:
                 raise HTTPException(503, "The worker could not start. No comparison was submitted; retry shortly.") from exc
             accepted = True
-            return {"id": job_id, "status": "running"}
+            return {"id": job_id, "status": "running", "source_count": len(sources)}
         except (json.JSONDecodeError, TypeError) as exc:
             raise HTTPException(422, "Invalid upload fields.") from exc
         finally:
@@ -518,10 +645,13 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
                     db.execute("DELETE FROM request_keys WHERE job=?", (job_id,))
                     db.execute("DELETE FROM diagnostics WHERE job=?", (job_id,))
                     db.execute("DELETE FROM jobs WHERE id=?", (job_id,))
+                    db.execute("DELETE FROM library_saves WHERE job=?", (job_id,))
                     if created_at is not None:
                         db.execute("DELETE FROM submissions WHERE owner=? AND created=?", (owner, created_at))
                 if folder.exists():
                     shutil.rmtree(folder)
+                if (save_root / job_id).exists():
+                    shutil.rmtree(save_root / job_id)
                 gate.release()
 
     @app.get("/api/public/jobs/{job_id}")
@@ -533,6 +663,10 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
         with connect() as db:
             entry = db.execute("SELECT data FROM diagnostics WHERE job=?", (job_id,)).fetchone()
         diagnostic = json.loads(entry[0]) if entry else {}
+        with connect() as db:
+            saving = db.execute("SELECT data FROM library_saves WHERE job=?", (job_id,)).fetchone()
+        value["library_saves"] = [{key: item[key] for key in ("source_id", "title", "state", "reason")}
+                                 for item in json.loads(saving[0])] if saving else []
         value["progress"] = {key: diagnostic[key] for key in ("stage", "source_index", "source_count",
                              "processed_sources", "checked_sources", "source_windows_visited",
                              "source_windows_total", "elapsed_seconds") if key in diagnostic}
@@ -554,9 +688,15 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
 
     @app.delete("/api/public/jobs/{job_id}")
     def delete(job_id: str, request: Request):
-        owned(job_id, session(request))
+        owner = session(request)
         with lock:
+            # Status is read under the same lock used to enter publication.
+            # A stale "running" snapshot must never acknowledge cancellation
+            # after the supervisor has completed comparison and begun saving.
+            row = owned(job_id, owner)
             if job_id in active:
+                if row["status"] != "running":
+                    raise HTTPException(409, "Shared saving is finishing. Try deleting shortly.")
                 process = active[job_id]
                 if process is None:
                     raise HTTPException(409, "Worker is starting; retry shortly.")
@@ -570,10 +710,47 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
             shutil.rmtree(root / job_id)
             if (results_root / job_id).exists():
                 shutil.rmtree(results_root / job_id)
+            if (save_root / job_id).exists():
+                shutil.rmtree(save_root / job_id)
             with connect() as db:
                 db.execute("DELETE FROM jobs WHERE id=?", (job_id,))
                 db.execute("DELETE FROM diagnostics WHERE job=?", (job_id,))
                 db.execute("DELETE FROM request_keys WHERE job=?", (job_id,))
+                db.execute("DELETE FROM library_saves WHERE job=?", (job_id,))
         return {"status": "deleted"}
+
+    @app.post("/api/public/jobs/{job_id}/library-save-retry", status_code=202)
+    def retry_save(job_id: str, request: Request):
+        owner = session(request)
+        if not gate.acquire(blocking=False):
+            raise HTTPException(429, "A comparison or shared save is in progress; retry shortly.")
+        try:
+            with lock:
+                row = owned(job_id, owner)
+                if shared is None or row["status"] not in {"complete", "report-failed", "failed"}:
+                    raise HTTPException(409, "This comparison has no completed shared-save operation to retry.")
+                with connect() as db:
+                    record = db.execute("SELECT data FROM library_saves WHERE job=?", (job_id,)).fetchone()
+                if not record or not any(item["state"] == "failed" for item in json.loads(record["data"])):
+                    raise HTTPException(409, "No failed shared save needs retrying.")
+                active[job_id] = None
+        except Exception:
+            gate.release()
+            raise
+        def work():
+            try:
+                persist_shared(job_id)
+            finally:
+                with lock:
+                    active.pop(job_id, None)
+                gate.release()
+        try:
+            threading.Thread(target=work, daemon=True).start()
+        except RuntimeError as exc:
+            with lock:
+                active.pop(job_id, None)
+            gate.release()
+            raise HTTPException(503, "The shared-save worker could not start.") from exc
+        return {"status": "saving"}
 
     return app

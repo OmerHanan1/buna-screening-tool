@@ -66,7 +66,7 @@ export function PaperDialog({ papers, selected, onSelect, onClose, readOnly = fa
         <label><input type="checkbox" disabled={readOnly} checked={selected.includes(paper.sha256)} onChange={e => onSelect(e.target.checked ? [...selected, paper.sha256] : selected.filter(id => id !== paper.sha256))} />
           <span className="hosted-source-copy"><strong title={paper.title}>{paper.title}</strong><small title={paper.version}>{paper.version}</small></span>
         </label>
-        {credits && <details><summary>Attribution and rights</summary><p className="hosted-attribution">{paper.attribution}</p><a href={paper.license_url} target="_blank" rel="noreferrer">{paper.license}</a></details>}
+        {credits && <details><summary>Attribution and rights</summary><p className="hosted-attribution">{paper.attribution}</p>{paper.license_url ? <a href={paper.license_url} target="_blank" rel="noreferrer">{paper.license}</a> : <p>{paper.license}</p>}</details>}
       </div>)}
       {!filtered.length && <p className="hosted-empty">No papers match “{query}”.</p>}
     </div>

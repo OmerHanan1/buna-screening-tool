@@ -25,9 +25,9 @@ ERRORS = {
 }
 
 
-def atomic_json(path: Path, value: dict):
+def atomic_json(path: Path, value: dict, *, ensure_ascii: bool = True):
     temporary = path.with_suffix(".new")
-    temporary.write_text(json.dumps(value))
+    temporary.write_text(json.dumps(value, ensure_ascii=ensure_ascii))
     temporary.replace(path)
 
 

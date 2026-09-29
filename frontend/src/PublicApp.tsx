@@ -4,7 +4,7 @@ import PdfActions from "./PdfActions";
 import { Elapsed, fileSize, ManuscriptInput, PaperDialog, validateFile, type HostedPaper } from "./PublicControls";
 import "./public.css";
 
-type Job = { id: string; status: string; checked?: number; total?: number; overlap_percent?: number; score_available?: boolean; partial?: boolean; warnings?: string[]; error?: string; algorithm_version?: string; comparison_model?: string; classification_counts?: { exact_words: number; similar_only_words: number; unmatched_words: number; not_fully_checked_words: number }; error_code?: string; diagnostic_id?: string; evidence_available?: boolean; progress?: { stage?: string; source_index?: number; source_count?: number; checked_sources?: number; elapsed_seconds?: number } };
+type Job = { id: string; status: string; checked?: number; total?: number; overlap_percent?: number; score_available?: boolean; partial?: boolean; warnings?: string[]; error?: string; algorithm_version?: string; comparison_model?: string; classification_counts?: { exact_words: number; similar_only_words: number; unmatched_words: number; not_fully_checked_words: number }; error_code?: string; diagnostic_id?: string; evidence_available?: boolean; library_saves?: { source_id: string; title: string; state: string; reason: string }[]; progress?: { stage?: string; source_index?: number; source_count?: number; checked_sources?: number; elapsed_seconds?: number } };
 const base = (import.meta.env.VITE_PUBLIC_API_URL || "").replace(/\/$/, "");
 const gatedMode = import.meta.env.VITE_EMAIL_GATE === "true";
 
@@ -13,6 +13,10 @@ export default function PublicApp() {
   const [selected, setSelected] = useState<string[]>([]);
   const [target, setTarget] = useState<File | null>(null);
   const [sources, setSources] = useState<File[]>([]);
+  const [keepSources, setKeepSources] = useState<Set<File>>(new Set());
+  const [sharedAvailable, setSharedAvailable] = useState(false);
+  const [libraryWarning, setLibraryWarning] = useState("");
+  const [saveRetrying, setSaveRetrying] = useState(false);
   const [job, setJob] = useState<Job | null>(null);
   const [retryStatus, setRetryStatus] = useState(0);
   const [error, setError] = useState("");
@@ -58,13 +62,17 @@ export default function PublicApp() {
     }
     return response;
   }
-  async function loadLibrary() {
+  async function loadLibrary(preserveSelection = false) {
     setLoadingLibrary(true); setError("");
     try {
       const response = gatedMode ? await request("/library") : await fetch(`${base}/api/public/library`, { credentials: "omit", signal: AbortSignal.timeout(90000) });
       if (!response.ok) throw new Error("The comparison library could not be loaded. Please retry.");
       const data = await response.json();
-      setPapers(data.papers); setSelected(data.papers.map((paper: HostedPaper) => paper.sha256));
+      const previous = new Set(papers.map(paper => paper.sha256));
+      setPapers(data.papers);
+      setSelected(current => data.papers.filter((paper: HostedPaper) => !preserveSelection || !previous.has(paper.sha256) || current.includes(paper.sha256)).map((paper: HostedPaper) => paper.sha256));
+      setSharedAvailable(data.shared_saving_available === true);
+      setLibraryWarning(data.shared_library_warning || "");
     } catch (e) { setError(e instanceof Error ? e.message : "The service could not be reached. Retry shortly."); }
     finally { setLoadingLibrary(false); }
   }
@@ -82,7 +90,7 @@ export default function PublicApp() {
     return () => { urls.current.forEach(URL.revokeObjectURL); };
   }, []);
   useEffect(() => {
-    if (!job || job.status !== "running" || (gatedMode && !entered)) return;
+    if (!job || (job.status !== "running" && !job.library_saves?.some(save => ["pending", "saving"].includes(save.state))) || (gatedMode && !entered)) return;
     let stopped = false, failures = 0, timer = 0;
     async function poll() {
       try {
@@ -93,7 +101,7 @@ export default function PublicApp() {
     }
     timer = window.setTimeout(poll, 1000);
     return () => { stopped = true; window.clearTimeout(timer); };
-  }, [job?.id, job?.status, retryStatus, entered]);
+  }, [job?.id, job?.status, job?.library_saves?.some(save => ["pending", "saving"].includes(save.state)), retryStatus, entered]);
 
   async function enter() {
     if (!gateReady || entering) return;
@@ -106,10 +114,12 @@ export default function PublicApp() {
   }
   function leave() {
     if (job?.status === "running") { setError("Cancel the running comparison before leaving this workspace."); return; }
+    if (job?.library_saves?.some(save => ["pending", "saving"].includes(save.state))) { setError("Shared saving is still finishing. Wait for its status before leaving."); return; }
     if (job?.status === "complete" && !window.confirm("Download your report first. Leaving removes this page’s access to it. Leave workspace?")) return;
     token.current = ""; setEntered(false); urls.current.forEach(URL.revokeObjectURL); urls.current = [];
     submission.current = null;
     setJob(null); setPapers([]); setSelected([]); setTarget(null); setSources([]); setConsent(false); setError("");
+    setKeepSources(new Set()); setSharedAvailable(false); setLibraryWarning("");
     setModel("validated-lexical");
   }
   async function chooseTarget(file: File) {
@@ -146,12 +156,18 @@ export default function PublicApp() {
       const form = new FormData();
       form.append("target", target); form.append("selected", JSON.stringify(selected));
       form.append("comparison_model", model);
+      const saveIndices = sources.flatMap((file, index) => keepSources.has(file) ? [index] : []);
+      if (saveIndices.length) {
+        form.append("save_sources", JSON.stringify(saveIndices));
+        form.append("share_authorized", "true");
+      }
       sources.forEach(file => form.append("sources", file));
       const fingerprint = JSON.stringify({ target: [target.name, target.size, target.lastModified], selected, model,
-        sources: sources.map(file => [file.name, file.size, file.lastModified]) });
+        sources: sources.map(file => [file.name, file.size, file.lastModified]), saveIndices });
       if (submission.current?.fingerprint !== fingerprint) submission.current = { key: crypto.randomUUID(), fingerprint };
       const created = await (await request("/jobs", { method: "POST", body: form, headers: { "Idempotency-Key": submission.current.key } })).json();
       const current = created.status === "running" ? created : await (await request(`/jobs/${created.id}`)).json();
+      if (created.source_count !== undefined) setSubmitted(previous => ({ ...previous, count: created.source_count }));
       setStartedAt(Date.now()); setJob(current);
     } catch (e) { setError((e as Error).message); }
     finally { setBusy(false); }
@@ -180,15 +196,28 @@ export default function PublicApp() {
       if (value.status === "deleted") { submission.current = null; setModel("validated-lexical"); }
     } catch (e) { setError((e as Error).message); }
   }
+  async function retrySharedSave() {
+    if (!job || saveRetrying) return;
+    setSaveRetrying(true); setError("");
+    try {
+      await request(`/jobs/${job.id}/library-save-retry`, { method: "POST" });
+      setJob({ ...job, library_saves: job.library_saves?.map(save => save.state === "failed" ? { ...save, state: "saving" } : save) });
+      setRetryStatus(value => value + 1);
+    } catch (e) { setError((e as Error).message); }
+    finally { setSaveRetrying(false); }
+  }
   function newComparison() {
+    if (job?.library_saves?.some(save => ["pending", "saving"].includes(save.state))) { setError("Wait for shared saving to finish before starting a new comparison."); return; }
     if (!window.confirm("Keep your downloaded report before starting a new comparison. Continue?")) return;
     submission.current = null;
     setModel("validated-lexical");
     setJob(null); setTarget(null); setSources([]); setConsent(false); setError(""); setFileError(""); setSourceError("");
+    setKeepSources(new Set());
+    void loadLibrary(true);
   }
   const hasAccess = !gatedMode || entered;
   const totalUpload = (target?.size || 0) + sources.reduce((sum, file) => sum + file.size, 0);
-  const disabledReason = !target ? "Add your manuscript to begin." : !selected.length && !sources.length ? "Select at least one comparison paper."
+  const disabledReason = loadingLibrary ? "Loading comparison papers…" : !target ? "Add your manuscript to begin." : !selected.length && !sources.length ? "Select at least one comparison paper."
     : totalUpload > 32 * 1024 * 1024 - 16384 ? "Combined uploads exceed the 32 MB request limit."
     : !consent ? "Confirm your upload permission below." : "";
   const fallbackWarning = job?.warnings?.find(w => w.startsWith("Abstract heading not detected"));
@@ -215,15 +244,20 @@ export default function PublicApp() {
           <p>{job?.status === "complete" ? "Review the annotated manuscript and matching source passages." : "Upload your manuscript. Get an annotated PDF of matching passages."}</p></div>
         {error && <p role="alert" className="hosted-error">{error}</p>}
         {loadingLibrary && <p role="status" className="hosted-loading"><LoaderCircle className="hosted-spin" size={15} />Loading comparison papers…</p>}
-        {!loadingLibrary && papers.length === 0 && <button onClick={loadLibrary}>Retry library connection</button>}
+        {!loadingLibrary && papers.length === 0 && <button onClick={() => loadLibrary()}>Retry library connection</button>}
+        {libraryWarning && <p role="alert" className="hosted-critical">{libraryWarning}</p>}
         {!job && <>
           <fieldset disabled={busy} className="hosted-surface hosted-form">
             <section className="hosted-section"><span className="hosted-label">Your manuscript</span><ManuscriptInput file={target} error={fileError} onFile={chooseTarget} onRemove={() => { targetChoice.current++; setTarget(null); setFileError(""); }} /></section>
-            <section className="hosted-sources-row"><div><h2>{selected.length} papers selected</h2><p>From the {papers.length}-paper reference library</p></div><button onClick={() => setReviewing(true)} disabled={!papers.length}>Review papers</button></section>
+            <section className="hosted-sources-row"><div><h2>{selected.length} papers selected</h2><p>From the {papers.length}-paper comparison library</p></div><button onClick={() => setReviewing(true)} disabled={!papers.length}>Review papers</button></section>
             <section className="hosted-extras">
               <input ref={extraInput} tabIndex={-1} className="hosted-hidden-input" type="file" multiple accept=".pdf,.txt" aria-label="Additional comparison papers" onChange={e => { void addSources(Array.from(e.target.files || [])); e.target.value = ""; }} />
               <button className="hosted-text-button" onClick={() => extraInput.current?.click()}><Plus size={15} />Add your own comparison papers</button>
-              {sources.map((file, i) => <div className="hosted-extra-file" key={`${file.name}-${i}`}><FileText size={15} aria-hidden="true" /><span title={file.name}>{file.name}</span><small>{fileSize(file.size)}</small><button className="hosted-icon-button" aria-label={`Remove comparison ${file.name}`} onClick={() => setSources(previous => previous.filter((_, index) => index !== i))}><X size={15} /></button></div>)}
+              {sources.map((file, i) => <div key={`${file.name}-${i}`}>
+                <div className="hosted-extra-file"><FileText size={15} aria-hidden="true" /><span title={file.name}>{file.name}</span><small>{fileSize(file.size)}</small><button className="hosted-icon-button" aria-label={`Remove comparison ${file.name}`} onClick={() => { setSources(previous => previous.filter((_, index) => index !== i)); setKeepSources(previous => { const next = new Set(previous); next.delete(file); return next; }); }}><X size={15} /></button></div>
+                {sharedAvailable && /\.pdf$/i.test(file.name) && <label className="hosted-shared-option"><input type="checkbox" checked={keepSources.has(file)} onChange={e => setKeepSources(previous => { const next = new Set(previous); if (e.target.checked) next.add(file); else next.delete(file); return next; })} />Keep in library for future comparisons<span className="hosted-sr-only">: {file.name}</span></label>}
+              </div>)}
+              {keepSources.size > 0 && <p className="hosted-shared-notice">Saved papers are available as comparison sources to everyone with app access. Select this only if you’re authorized to store and share the file for hosted comparisons and matching excerpts.</p>}
               {sourceError && <p role="alert" className="hosted-field-error">{sourceError}</p>}
               <details className="hosted-model-details"><summary>{model === "classified-v1.1" ? "Advanced · experimental model selected" : "Advanced"}</summary>
                 <label htmlFor="comparison-model">Comparison model</label>
@@ -256,7 +290,12 @@ export default function PublicApp() {
             <div className="hosted-bottom-actions"><button onClick={newComparison}>New comparison</button><button className="hosted-text-button" onClick={() => { if (window.confirm("Delete this temporary comparison and its report?")) void remove(); }}>Delete report</button></div>
           </> : <div className="hosted-surface hosted-progress"><h2>{job.status === "cancelled" ? "Comparison cancelled" : job.evidence_available ? "Comparison saved; PDF unavailable" : "Couldn’t finish this comparison"}</h2><p>{job.error || "No report was created."}</p>{job.diagnostic_id && <p className="hosted-report-note">Reference {job.diagnostic_id.slice(0, 8)} · {stages[job.progress?.stage || ""] || "Processing"} · {job.error_code}</p>}<div className="hosted-bottom-actions">{job.evidence_available && <button onClick={() => reportFile("json")}>Download evidence JSON</button>}<button onClick={() => { void remove(); }}>Back to setup</button></div></div>}
         </section>}
-        <details className="hosted-info"><summary>Privacy, access and source credits</summary><p>Files are processed on Azure, not sent to external AI or discovery providers. This page’s random access token stays in memory. Refreshing or leaving loses access. Server files expire within one hour and may disappear sooner after restart.</p><p>Email ownership is not verified; anyone knowing an allowed email can enter. Separate visitor tokens protect each visitor’s jobs. Do not upload confidential or sensitive manuscripts.</p><p>Manuscripts: 10 MB, 250 pages, 250,000 extracted characters. Up to five added papers, 8 MB each; total upload limit 32 MB. Pages and extractability are checked during comparison. Resource limits can produce partial results.</p><button onClick={() => setReviewing(true)}>Review source credits</button><button onClick={credits}>Download source credits</button></details>
+        {job?.library_saves?.length ? <section className="hosted-info" aria-label="Shared library save status">
+          <strong>Shared library</strong>
+          {job.library_saves.map(save => <p key={save.source_id}>{save.title}: {save.state === "saved" ? "Saved for future comparisons." : save.state === "already-present" ? "Already in the library." : ["pending", "saving"].includes(save.state) ? "Saving…" : save.reason || "Not saved."}</p>)}
+          {job.library_saves.some(save => save.state === "failed") && <button disabled={saveRetrying} onClick={retrySharedSave}>Retry library save</button>}
+        </section> : null}
+        <details className="hosted-info"><summary>Privacy, access and source credits</summary><p>Files are processed on Azure, not sent to external AI or discovery providers. This page’s random access token stays in memory. Refreshing or leaving loses access. Manuscripts, reports and unsaved comparison files expire within one hour and may disappear sooner after restart. Comparison PDFs explicitly kept in the shared library persist for future visitors; the manuscript is never saved by that option.</p><p>Email ownership is not verified; anyone knowing an allowed email can enter and use shared papers for comparisons. Separate visitor tokens protect each visitor’s jobs. Do not upload confidential or sensitive manuscripts.</p><p>Manuscripts: 10 MB, 250 pages, 250,000 extracted characters. Up to five added papers, 8 MB each; total upload limit 32 MB. Pages and extractability are checked during comparison. Resource limits can produce partial results.</p><button onClick={() => setReviewing(true)}>Review source credits</button><button onClick={credits}>Download source credits</button></details>
         <p className="hosted-info">Temporary workspace · Download your report before leaving.</p>
       </>}
     </main>

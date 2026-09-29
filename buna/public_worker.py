@@ -11,6 +11,7 @@ import sys
 import signal
 import time
 import re
+import shutil
 from buna.hosted_runtime import CPU_SECONDS, WALL_SECONDS, COMPARISON_SECONDS, atomic_json
 
 
@@ -92,7 +93,7 @@ def main():
     isolate(int(sys.argv[2]))
     os.chdir(folder)
     from buna.documents import extract_document, ExtractionError
-    from buna.comparison import compare_documents
+    from buna.comparison import compare_documents, text_fingerprint
     from buna.pdf_reports import generate_pdf, _typeset
     from buna.result_state import result_state
     import pymupdf
@@ -113,6 +114,8 @@ def main():
     target = extract(Path(request["target"]))
     if len(target["text"]) > 250_000:
         raise ValueError("Public manuscript limit is 250,000 extracted characters.")
+    target_fingerprint = text_fingerprint(target["text"])
+    share_results = {}
     sources = []
     for index, entry in enumerate(request["sources"]):
         sources.append({"id": str(index + 1), "title": entry["title"], "filename": entry["title"],
@@ -122,6 +125,8 @@ def main():
     def load_document(source):
         entry = source["entry"]
         progress("load-source", source_index=int(source["id"]))
+        if entry.get("unavailable_reason"):
+            raise ValueError(entry["unavailable_reason"])
         if entry.get("cached_document"):
             try:
                 raw = Path(entry["cached_document"]).read_bytes()
@@ -133,12 +138,34 @@ def main():
         parsed = Path("parsed-source-" + source["id"] + ".json")
         if parsed.exists():
             return json.loads(parsed.read_text())
+        canonical = None
         try:
-            document = extract(Path(entry["path"]), profile="source")
+            parse_path = Path(entry["path"])
+            if entry.get("keep_in_library"):
+                digest = hashlib.sha256(parse_path.read_bytes()).hexdigest()
+                canonical = Path("shared-validate-" + digest + ".pdf")
+                shutil.copyfile(parse_path, canonical)
+                parse_path = canonical
+            document = extract(parse_path, profile="source")
         except (ExtractionError, ParseTimeout) as exc:
             # Report source-local extraction failures without returning paths or content.
             raise ValueError("Comparison source extraction failed (" + type(exc).__name__ + ").") from None
-        atomic_json(parsed, document)
+        finally:
+            if canonical:
+                canonical.unlink(missing_ok=True)
+        if entry.get("keep_in_library"):
+            from buna.shared_library import checked_document, SharedLibraryError
+            try:
+                if Path(entry["path"]).suffix.lower() != ".pdf":
+                    raise SharedLibraryError("Only supplementary PDFs can be saved.")
+                if text_fingerprint(document["text"]) == target_fingerprint:
+                    raise SharedLibraryError("This source is identical to your manuscript and was not shared.")
+                checked_document(document)
+                share_results[source["id"]] = {"validated": True}
+            except SharedLibraryError as exc:
+                share_results[source["id"]] = {"validated": False, "reason": str(exc)}
+            atomic_json(Path("share-validation.json"), share_results)
+        atomic_json(parsed, document, ensure_ascii=False)
         return document
     last_progress = 0
     def comparison_progress(message):

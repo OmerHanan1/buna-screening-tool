@@ -22,6 +22,9 @@ param accessMode string = ''
 @description('One email or comma-separated allowed emails; requires a multi-email-compatible image for lists.')
 param allowedEmail string = ''
 param attestedCorpusSha string = ''
+param sharedAccountUrl string = ''
+param sharedContainer string = ''
+param sharedIdentityClientId string = ''
 
 resource environment 'Microsoft.App/managedEnvironments@2024-03-01' existing = {
   name: environmentName
@@ -60,6 +63,9 @@ resource application 'Microsoft.App/containerApps@2024-03-01' = {
           { name: 'BUNA_TEAM_OWNER_OID', value: teamOwnerObjectId }
           { name: 'BUNA_ACCESS_MODE', value: accessMode }
           { name: 'BUNA_ATTESTED_CORPUS_SHA', value: attestedCorpusSha }
+          { name: 'BUNA_SHARED_ACCOUNT_URL', value: sharedAccountUrl }
+          { name: 'BUNA_SHARED_CONTAINER', value: sharedContainer }
+          { name: 'BUNA_SHARED_IDENTITY_CLIENT_ID', value: sharedIdentityClientId }
           {
             name: 'BUNA_ALLOWED_EMAIL'
             ...(!empty(allowedEmail) ? { secretRef: 'allowed-email' } : { value: '' })

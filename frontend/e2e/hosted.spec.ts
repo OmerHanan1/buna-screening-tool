@@ -363,3 +363,53 @@ test("experimental model requires explicit selection and resets for a new compar
   await page.getByText("Advanced", { exact: true }).click();
   await expect(page.getByLabel("Comparison model")).toHaveValue("validated-lexical");
 });
+
+test("shared save is source-only, opt-in and does not change an existing selection snapshot", async ({ page }) => {
+  let saved = false;
+  let submitted = "";
+  const addition = { ...papers[0], sha256: "f".repeat(64), title: "New shared synthetic paper" };
+  await page.route(site + "**", async route => {
+    const name = new URL(route.request().url()).pathname.replace(new URL(site).pathname, "") || "index.html";
+    await route.fulfill({ body: await fs.readFile(path.resolve("../public-dist", name)), contentType: name.endsWith(".js") ? "text/javascript" : name.endsWith(".css") ? "text/css" : "text/html" });
+  });
+  await page.route(backend + "/**", async route => {
+    const url = new URL(route.request().url());
+    if (url.pathname.endsWith("/config")) return route.fulfill({ json: { mode: "email-gate" } });
+    if (url.pathname.endsWith("/session")) return route.fulfill({ json: { token: "synthetic-shared-capability" } });
+    if (url.pathname.endsWith("/library")) return route.fulfill({ json: { papers: saved ? [...papers, addition] : papers, shared_saving_available: true } });
+    if (route.request().method() === "POST") {
+      submitted = route.request().postData() || "";
+      saved = true;
+      return route.fulfill({ status: 202, json: { id: "shared-fixture", status: "running", source_count: 44 } });
+    }
+    if (url.pathname.endsWith(".pdf")) return route.fulfill({ contentType: "application/pdf", body: "%PDF-1.7\nSynthetic shared fixture" });
+    return route.fulfill({ json: { id: "shared-fixture", status: "complete", checked: 44, total: 44, overlap_percent: 12, score_available: true,
+      library_saves: [{ source_id: "44", title: "comparison.pdf", state: "saved", reason: "" }] } });
+  });
+  await page.goto(site);
+  await page.getByLabel("Email address").fill("fixture@example.org");
+  await page.getByRole("button", { name: "Continue", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "44 papers selected" })).toBeVisible();
+  await page.getByLabel("Your paper", { exact: true }).setInputFiles({ name: "manuscript.pdf", mimeType: "application/pdf", buffer: Buffer.from("%PDF-1.7\nSynthetic header fixture") });
+  await expect(page.getByRole("checkbox", { name: /Keep in library/ })).toHaveCount(0);
+  await page.getByLabel("Additional comparison papers").setInputFiles({ name: "comparison.pdf", mimeType: "application/pdf", buffer: Buffer.from("%PDF-1.7\nSynthetic source header fixture") });
+  const keep = page.getByRole("checkbox", { name: /Keep in library for future comparisons/ });
+  await expect(keep).not.toBeChecked();
+  await keep.check();
+  await expect(page.getByText(/Saved papers are available as comparison sources to everyone/)).toBeVisible();
+  await page.getByRole("button", { name: "Review papers", exact: true }).click();
+  await page.locator(".hosted-source-item input").first().uncheck();
+  await page.keyboard.press("Escape");
+  await page.getByRole("checkbox", { name: /authorized to upload/ }).check();
+  await page.getByRole("button", { name: "Compare papers", exact: true }).click();
+  await expect(page.getByText("comparison.pdf: Saved for future comparisons.", { exact: true })).toBeVisible();
+  expect(submitted).toContain('name="save_sources"');
+  expect(submitted).toContain('name="share_authorized"');
+  page.on("dialog", dialog => dialog.accept());
+  await page.getByRole("button", { name: "New comparison", exact: true }).click();
+  await expect(page.getByText("From the 45-paper comparison library", { exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "44 papers selected" })).toBeVisible();
+  await page.getByRole("button", { name: "Review papers", exact: true }).click();
+  await expect(page.locator(".hosted-source-item input").first()).not.toBeChecked();
+  await expect(page.locator(".hosted-source-item input").last()).toBeChecked();
+});
