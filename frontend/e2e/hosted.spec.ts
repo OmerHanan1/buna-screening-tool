@@ -1,9 +1,73 @@
 import { test, expect } from "@playwright/test";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 
 const site = "https://omerhanan1.github.io/buna-screening-tool/";
 const backend = "https://paper-overlap-api.purpleflower-beedf5ce.eastus.azurecontainerapps.io";
+
+test("opt-in actual hosted PDF workflow", async ({ page }) => {
+  test.skip(!process.env.HOSTED_TEST_EMAIL, "Requires explicit authorized live-test email.");
+  test.setTimeout(360_000);
+  page.setDefaultTimeout(90_000);
+  await page.goto(site, { waitUntil: "domcontentloaded" });
+  await page.getByLabel("Email address").fill("wrong@example.invalid");
+  await page.getByRole("button", { name: "Continue", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("Access is not available");
+  await page.getByLabel("Email address").fill(process.env.HOSTED_TEST_EMAIL!);
+  await page.getByRole("button", { name: "Continue", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "44 papers selected", exact: true })).toBeVisible({ timeout: 90_000 });
+  await page.screenshot({ path: test.info().outputPath("live-setup-desktop.png"), fullPage: true });
+  await page.getByRole("button", { name: "Review papers", exact: true }).click();
+  await expect(page.locator(".hosted-source-item input")).toHaveCount(44);
+  await page.locator(".hosted-source-item input").first().uncheck();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("heading", { name: "43 papers selected", exact: true })).toBeVisible();
+  const sentence = "The ceramic sensor records a stable sequence of local measurements during every carefully controlled laboratory cycle.";
+  const pdf = (title: string) => {
+    const result = spawnSync("../.venv/bin/python", ["-c",
+      "import pymupdf as f,sys;d=f.open();p=d.new_page();p.insert_text((50,60),sys.argv[1]);p.insert_text((50,90),'Abstract');p.insert_text((50,120),sys.argv[2],fontsize=8);p.insert_text((50,150),'Original ending unique to '+sys.argv[1]);sys.stdout.buffer.write(d.tobytes())",
+      title, sentence]);
+    expect(result.status).toBe(0); return result.stdout;
+  };
+  await page.getByLabel("Your paper", { exact: true }).setInputFiles({ name: "Synthetic manuscript.pdf", mimeType: "application/pdf", buffer: pdf("Synthetic manuscript") });
+  await expect(page.getByText("Ready to upload", { exact: true })).toBeVisible();
+  await page.getByLabel("Additional comparison papers").setInputFiles({ name: "Synthetic source.pdf", mimeType: "application/pdf", buffer: pdf("Synthetic source") });
+  await expect(page.getByRole("button", { name: "Remove comparison Synthetic source.pdf" })).toBeVisible();
+  await page.getByRole("checkbox", { name: /authorized to upload/ }).check();
+  await page.screenshot({ path: test.info().outputPath("live-files-selected.png"), fullPage: true });
+  await page.getByRole("button", { name: "Compare papers", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Comparing your manuscript", exact: true })).toBeVisible({ timeout: 90_000 });
+  await page.screenshot({ path: test.info().outputPath("live-progress.png"), fullPage: true });
+  await expect(page.getByRole("heading", { name: "Comparison report", exact: true })).toBeVisible({ timeout: 240_000 });
+  await expect(page.getByText("44 / 44", { exact: true })).toBeVisible();
+  await page.screenshot({ path: test.info().outputPath("live-result-desktop.png"), fullPage: true });
+  const popupWait = page.waitForEvent("popup");
+  await page.getByRole("button", { name: "Open PDF", exact: true }).click();
+  const popup = await popupWait;
+  await expect.poll(() => popup.url(), { timeout: 90_000 }).toMatch(/^blob:/);
+  await popup.close();
+  const downloadWait = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Download PDF", exact: true }).click();
+  const download = await downloadWait;
+  expect(download.suggestedFilename()).toBe("paper-overlap-report.pdf");
+  const chunks: Buffer[] = [];
+  for await (const chunk of (await download.createReadStream())!) chunks.push(Buffer.from(chunk));
+  const bytes = Buffer.concat(chunks);
+  expect(bytes.subarray(0, 5).toString()).toBe("%PDF-");
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.screenshot({ path: test.info().outputPath("live-result-mobile.png"), fullPage: true });
+  await page.evaluate(() => document.documentElement.setAttribute("data-theme", "dark"));
+  await page.screenshot({ path: test.info().outputPath("live-result-mobile-dark.png"), fullPage: true });
+  page.on("dialog", dialog => dialog.accept());
+  await page.getByRole("button", { name: "Delete report", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "New comparison", exact: true })).toBeVisible();
+  await fs.writeFile(test.info().outputPath("live-proof.json"), JSON.stringify({
+    url: site, default_sources: 44, optout_retained: 43, synthetic_manual_sources: 1,
+    fully_checked: 44, pdf_bytes: bytes.length, open_pdf_blob: true, deleted: true,
+  }, null, 2));
+});
 const papers = Array.from({ length: 44 }, (_, i) => ({
   sha256: i.toString(16).padStart(64, "0"),
   title: [
