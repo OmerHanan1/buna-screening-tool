@@ -313,7 +313,7 @@ class Engine:
             check()
             update(stage="comparison", progress=70, message="Comparing local full text and aggregating unique manuscript spans.")
             checkpoint_key = consent_digest({
-                "algorithm": ALGORITHM_VERSION, "manuscript": job.get("manuscript_sha256"),
+                "algorithm": ALGORITHM_VERSION, "score_policy": "eligible-manuscript-v1", "manuscript": job.get("manuscript_sha256"),
                 "source_capacity_profile": "source-v1", "source_character_limit": SOURCE_MAX_CHARACTERS,
                 "settings": job.get("comparison_settings", {}),
                 "sources": [(p["id"], p.get("sha256"), p.get("excluded"), p.get("doi")) for p in papers],

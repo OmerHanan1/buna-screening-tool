@@ -9,7 +9,8 @@ export default function PdfReport({ report, jobId, engineVersion }: { report: Re
   const endpoint = `/api/jobs/${jobId}/report.pdf`;
   const scope = report.settings?.manuscript_scope;
   const basis = report.metrics.score_basis === "abstract-onward-word-units" ? "words from the Abstract onward"
-    : report.metrics.score_basis === "all-submitted-word-units" ? "total submitted word units" : "eligible manuscript words (saved legacy basis)";
+    : report.metrics.score_basis === "all-submitted-word-units" ? "total submitted word units"
+    : report.metrics.score_basis === "eligible-manuscript-word-units" ? "eligible manuscript words after exclusions" : "eligible manuscript words (saved legacy basis)";
   useEffect(() => {
     const controller = new AbortController();
     setReady(false); setError("");

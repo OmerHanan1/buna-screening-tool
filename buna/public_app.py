@@ -280,7 +280,8 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
     @app.get("/health")
     def health():
         return {"status": "ok", "mode": "email-gate" if email_gate else "team-restricted" if team_auth else "public-isolated",
-                "engine": "2.5.3", "pdf_renderer": PDF_RENDERER_VERSION, "runtime": "cached-corpus-v1"}
+                "engine": "2.5.4", "pdf_renderer": PDF_RENDERER_VERSION, "runtime": "cached-corpus-v1",
+                "score_policy_version": "eligible-manuscript-v1"}
 
     @app.get("/api/auth/config")
     def auth_config():
@@ -463,7 +464,7 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
                 raise RuntimeError("Invalid result metadata.")
             public_summary = {k: summary[k] for k in ("checked", "total", "overlap_percent", "partial",
                               "warnings", "algorithm_version", "score_available", "comparison_model",
-                              "classification_counts") if k in summary}
+                              "classification_counts", "score_basis", "score_policy_version", "word_accounting") if k in summary}
             pdf = read_artifact(folder, "report.pdf", 64 * 1024 * 1024)
             evidence = read_artifact(folder, "report.json", 64 * 1024 * 1024)
             if not pdf.startswith(b"%PDF-"):
@@ -490,7 +491,7 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
                 (destination / "complete.json").write_text(json.dumps({
                     key: summary[key] for key in ("checked", "total", "overlap_percent", "partial", "warnings",
                                                  "algorithm_version", "score_available", "comparison_model",
-                                                 "classification_counts") if key in summary
+                                                 "classification_counts", "score_basis", "score_policy_version", "word_accounting") if key in summary
                 }))
                 (destination / "report.json").write_bytes(evidence)
                 diagnostic["code"] = "pdf-error"

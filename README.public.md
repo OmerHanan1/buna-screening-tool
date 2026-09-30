@@ -37,6 +37,14 @@ The **Keep in library for future comparisons** checkbox is off by default and
 never applies to the manuscript. Saved papers are available to everyone with app
 access; this is not a private personal library. See [shared storage and limits](docs/shared-library.md).
 
+New standard-model reports use `eligible-manuscript-v1`: overlap is divided by unique eligible
+manuscript words after recognized front-matter, bibliography and enabled quotation
+exclusions. Unmatched eligible words still count; unavailable sources do not
+shrink the denominator. Exclusions are counted once, and zero eligible words is
+unscorable. Matching rules are unchanged. The opt-in experimental model temporarily
+retains its scoped-total denominator; each report identifies its own saved basis.
+Saved older reports keep their original basis.
+
 The hosted workspace starts with all available default papers selected. Use
 **Review papers** to search, deselect or inspect credits, then upload a manuscript
 and choose **Compare papers**. Optional comparison uploads stay separate from the

@@ -17,6 +17,7 @@
 !deploy/verify_bulk_local.py
 !deploy/verify_bulk_azure.py
 !deploy/verify_pdf_sources.py
+!deploy/verify_eligible_policy.py
 !release-context
 !release-context/wheels
 !release-context/wheels/*.whl

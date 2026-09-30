@@ -208,7 +208,7 @@ export default function ManualApp() {
           <label><input type="checkbox" checked={excludeQuotes} disabled={locked} onChange={event => setExcludeQuotes(event.target.checked)} /> Exclude recognized quotations from matching</label>
           <label><input type="checkbox" checked={experimental} disabled={locked} onChange={event => setExperimental(event.target.checked)} /> Use experimental ordered-instance model</label>
           {experimental && <p className="app-error">Experimental: increased recall has not established precision. This is not a validated vendor-equivalent model.</p>}
-          <p className="muted">Algorithm {engineVersion || "unavailable"} · Nine-word configured minimum · Total-document score basis.
+          <p className="muted">Algorithm {engineVersion || "unavailable"} · Nine-word configured minimum · Eligible manuscript words after exclusions.
             Manuscript limits: 20 MiB, 250 pages, 1 million extracted characters. Comparison sources: 32 MiB, 600 pages, 2 million characters. Matching remains bounded to 120 seconds/source and 64 MiB estimated retained evidence; large sources may be partially checked.
             Scanned PDFs need OCR before upload.</p>
           {job?.document?.warnings && <details><summary>Extraction notes</summary><ul>{job.document.warnings.map((note, i) => <li key={i}>{note}</li>)}</ul></details>}

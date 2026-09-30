@@ -13,7 +13,7 @@ from buna.local_alignment import DEFAULT_POLICY, merge_instances, ordered_instan
 from buna.exclusions import quotation_intervals
 from buna.documents import _REFERENCE_HEADING, abstract_start, SOURCE_MAX_CHARACTERS
 
-ALGORITHM_VERSION = "2.5.3"
+ALGORITHM_VERSION = "2.5.4"
 SHINGLE_WORDS = 2
 MIN_EXACT_WORDS = 9
 MIN_NEAR_WORDS = 9
@@ -766,11 +766,16 @@ def compare_documents(manuscript: dict, sources: list[dict],
             "Retained evidence and score are a lower bound, not a completed comparison."
         )
     warnings.extend(source_warnings)
-    denominator = sum(eligible)
-    front_words = sum(front_mask)
-    score_denominator = len(mt) - front_words
-    basis, policy_version = (("abstract-onward-word-units", "abstract-onward-v1") if start_offset is not None
-                             else ("all-submitted-word-units", "total-document-v1"))
+    from buna.score_policy import manuscript_word_accounting, DENOMINATOR_DESCRIPTION
+    accounting = manuscript_word_accounting(eligible, front_mask, ref_mask, quote_mask, exclude_quotes=exclude_quotes)
+    denominator = score_denominator = accounting["score_denominator_words"]
+    basis, policy_version = accounting["score_basis"], accounting["score_policy_version"]
+    if match_policy:
+        score_denominator = accounting["scoped_words"]
+        basis, policy_version = (("abstract-onward-word-units", "abstract-onward-v1") if start_offset is not None
+                                 else ("all-submitted-word-units", "total-document-v1"))
+        accounting.update(score_denominator_words=score_denominator, score_basis=basis, score_policy_version=policy_version,
+                          unscorable=score_denominator == 0, all_text_excluded=denominator == 0 and score_denominator > 0)
     source_words: dict[str, set[int]] = defaultdict(set)
     for match, aligned in evidence:
         source_words[str(match["source_id"])].update(match["scored_word_positions"])
@@ -779,10 +784,10 @@ def compare_documents(manuscript: dict, sources: list[dict],
             count = len(source_words[str(row["source_id"])])
             row.update(
                 overlapping_words=count, eligible_words=denominator, score_denominator_words=score_denominator,
-                overlap_percent=round(100 * count / score_denominator, 2) if score_denominator else 0.0,
+                overlap_percent=round(100 * count / score_denominator, 2) if score_denominator else None,
             )
     if not denominator:
-        warnings.append("No eligible manuscript words remain after exclusions. A zero score on a nonempty total-document denominator reflects filters, not an originality finding.")
+        warnings.append("No eligible manuscript words remain after exclusions. The comparison is unscorable; no similarity percentage is available.")
     source_numbers = {str(source.get("id", f"source-{i + 1}")): source.get("source_number", i + 1) for i, source in enumerate(sources)}
     for match, aligned in evidence:
         match["source_number"] = source_numbers[str(match["source_id"])]
@@ -802,7 +807,7 @@ def compare_documents(manuscript: dict, sources: list[dict],
                      "score_basis": basis,
                      "score_policy_version": policy_version,
                      "manuscript_scope": scope,
-                     "vendor_post_filter_denominator": "unresolved; total-document basis is a declared interpretation",
+                     "vendor_post_filter_denominator": "unresolved; eligible-manuscript denominator is the user-selected application policy",
                      "near_similarity": NEAR_THRESHOLD, "maximum_alignment_gap_words": 6,
                      "filter_order": "exclude-regions-then-local-nine-word-minimum",
                      "evidence_consolidation": "compatible-paired-union-v1",
@@ -814,19 +819,10 @@ def compare_documents(manuscript: dict, sources: list[dict],
                      "total_time_limit_seconds": total_time_limit_seconds,
                      "source_capacity_profile": "source-v1", "source_character_limit": SOURCE_MAX_CHARACTERS,
                      "candidate_limit": None, "comparison_count_limit": None, "finding_display_page_size": 10},
-        "metrics": {"total_words": len(mt), "eligible_words": denominator,
-                    "score_denominator_words": score_denominator,
-                    "analyzed_words": score_denominator, "front_matter_words": front_words,
-                    "score_basis": basis,
-                    "score_policy_version": policy_version,
+        "metrics": {**accounting,
                     "overlapping_words": len(covered),
-                    "overlap_percent": round(100 * len(covered) / score_denominator, 2) if score_denominator else 0.0,
+                    "overlap_percent": round(100 * len(covered) / score_denominator, 2) if score_denominator else None,
                     "eligible_body_overlap_percent": round(100 * len(covered) / denominator, 2) if denominator else None,
-                    "bibliography_words": sum(ref_mask),
-                    "quotation_words": sum(q and not r for q, r in zip(quote_mask, scope_mask)),
-                    "excluded_quotation_words": sum(q and not r for q, r in zip(quote_mask, scope_mask)) if exclude_quotes else 0,
-                    "unscorable": score_denominator == 0,
-                    "all_text_excluded": denominator == 0 and score_denominator > 0,
                     "quotation_overlap_words": sum(quote_mask[index] for index in covered),
                     "sources_supplied": len(sources), "sources_compared": compared_sources,
                     "identical_sources_excluded": len(identical_sources), "truncated": truncated},
@@ -873,11 +869,7 @@ def compare_documents(manuscript: dict, sources: list[dict],
                 "are never bridged. One best path per anchor is selected by exact count, weighted similarity, then shorter span; "
                 "identical evidence is deduplicated while distinct source locations remain."
             ),
-            "denominator": "By default, manuscript word units from the first structural Abstract heading onward (abstract-onward-v1); front matter before it "
-                           "(title, authors, affiliations, funding, cover pages) is excluded from matching and from the denominator and counted separately. "
-                           "If no Abstract heading is recognized, all submitted word units are used with a visible warning (total-document-v1). "
-                           "Bibliography and quotation exclusions remove included matches, not denominator units. Comparison sources are not scoped. "
-                           "Proprietary post-filter arithmetic is not established. Eligible/excluded counts remain separate.",
+            "denominator": DENOMINATOR_DESCRIPTION,
             "numerator": "Union of eligible manuscript token positions aligned to identical normalized source words "
                          "in retained evidence. Overlapping sources and evidence never double-count.",
             "evidence_consolidation": "Both models canonicalize compatible already-qualified candidates before checkpoints and report counts. "
@@ -923,7 +915,7 @@ def compare_documents(manuscript: dict, sources: list[dict],
                          "characters for nonexact chains. Keep maximal compatible instances and merge overlap-compatible source-local "
                          "paths across retrieval windows. No six-word-anchor or one-inflection special path. Existing timeout/memory budgets "
                          "remain explicit; this is an experiment, not an exhaustive proprietary-algorithm reconstruction.",
-            "denominator": "Submitted typed word units within the manuscript scope (Abstract onward when recognized), including bibliography/quotation regions. Eligible units and filtered-body ratio are retained in the ledger only.",
+            "denominator": "Submitted typed word units within the saved manuscript scope, including bibliography and quotation regions; retained experimental policy.",
             "numerator": "Union of included actually equal word positions. Partial numeric prefix evidence, when enabled, is a separate character layer and never whole-word credit.",
             "exclusions": result["methodology"]["exclusions"],
             "limitations": "Provisional same-manuscript benchmark only; additional predictions are unadjudicated, not established true or false positives. "

@@ -73,7 +73,8 @@ def render_report(report: dict) -> str:
     denominator = metrics.get("score_denominator_words", metrics.get("eligible_words", 0))
     score = f'{_escape(metrics.get("overlap_percent", 0))}%' if result["score_available"] else "Not assessed"
     basis = {"all-submitted-word-units": "total submitted word units",
-             "abstract-onward-word-units": "words from the Abstract onward"}.get(metrics.get("score_basis"), "eligible manuscript words (saved legacy basis)")
+             "abstract-onward-word-units": "words from the Abstract onward",
+             "eligible-manuscript-word-units": "eligible manuscript words after exclusions"}.get(metrics.get("score_basis"), "eligible manuscript words (saved legacy basis)")
     manuscript_scope = (report.get("settings") or {}).get("manuscript_scope") or {}
     scope_notice = "Abstract heading not detected; the whole manuscript was analyzed (front matter was not excluded)." if manuscript_scope.get("requested") == "abstract-onward" and manuscript_scope.get("applied") == "whole-document" else ""
     sources = {str(source["id"]): source for source in reader["sources"]}

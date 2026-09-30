@@ -224,6 +224,11 @@ def main():
         "partial": outcome["state"] == "partial" or outcome["score_kind"] == "lower_bound",
         "algorithm_version": report["algorithm_version"], "score_available": outcome["score_available"],
         "comparison_model": model,
+        "score_basis": report["metrics"].get("score_basis"),
+        "score_policy_version": report["metrics"].get("score_policy_version"),
+        "word_accounting": {key: report["metrics"].get(key) for key in (
+            "total_words", "scoped_words", "eligible_words", "score_denominator_words", "overlapping_words",
+            "front_matter_words", "excluded_bibliography_words", "excluded_quotation_words", "other_excluded_manuscript_words")},
     }
     if report.get("classification"):
         summary["classification_counts"] = {key: report["classification"]["metrics"][key] for key in

@@ -16,6 +16,7 @@ COPY deploy/verify_shared.py /app/deploy/verify_shared.py
 COPY deploy/verify_library_removal.py /app/deploy/verify_library_removal.py
 COPY deploy/verify_bulk_local.py deploy/verify_bulk_azure.py /app/deploy/
 COPY deploy/verify_pdf_sources.py /app/deploy/
+COPY deploy/verify_eligible_policy.py /app/deploy/
 COPY release-context/wheels /wheels
 RUN pip install --no-index --find-links=/wheels setuptools wheel \
     && pip install --no-index --find-links=/wheels --no-build-isolation . \

@@ -2,7 +2,7 @@
 
 The hosted **Advanced** control offers `classified-v1.1` as an explicit opt-in.
 The default remains **Standard wording comparison** (`validated-lexical`, engine
-2.5.3). Starting a new comparison resets the selector to the standard model.
+2.5.4). Starting a new comparison resets the selector to the standard model.
 Existing reports, source extracts and comparisons are not relabeled or rerun.
 
 ## Labels and scoring
@@ -31,6 +31,18 @@ those exact words. Source alternatives remain in the evidence. The candidate has
 a separately recorded numeric/Unicode normalization version, so its denominator
 and score can differ from the standard model.
 
+New standard comparisons use score policy `eligible-manuscript-v1`: the
+denominator is the unique manuscript word positions remaining after the recognized
+Abstract scope, bibliography and enabled quotation exclusions. Exclusion masks
+overlap without double subtraction. Unmatched eligible words remain counted;
+excluded/unavailable sources and rejected short matches do not reduce it.
+The experimental model currently retains its prior scoped-total denominator,
+including bibliography/quotation words. Its reports label that saved basis;
+do not assume its percentages use the standard model's new denominator.
+Tokenizers and matching rules have not changed, and old saved reports retain
+their original denominators. The standard change is a user-selected policy,
+not established Crossref arithmetic.
+
 ## PDF presentation
 
 New experimental PDFs use restrained rose for exact wording and amber for
@@ -41,7 +53,8 @@ their complete original passages. The comment body remains the two fields
 `Source: #N` and `Overlapped text:`. Excluded passages are not painted as included
 overlap. Original manuscript page geometry and matched-word coordinates remain.
 
-Renderer 6 creates separate cached artifacts. Standard/legacy reports without
+Renderer 7 creates separate cached artifacts and checks that every source-table row
+is rendered. Standard/legacy reports without
 classification data retain their previous labeling; the renderer does not infer
 new categories from old `near-verbatim` records.
 

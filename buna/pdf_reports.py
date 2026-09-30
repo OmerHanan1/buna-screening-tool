@@ -470,8 +470,16 @@ def generate_pdf(payload: dict, destination: Path) -> dict:
         body += "<p class='muted'>Exact: contiguous equal normalized words. Similar: shared wording with bounded edits or reordering. Exact takes visual precedence; comments retain source alternatives. E/S marks remain usable in grayscale.</p>"
     body += _summary_table(report, numbers, names)
     basis = {"all-submitted-word-units": "total submitted word units",
-             "abstract-onward-word-units": "words from the Abstract onward"}.get(metrics.get("score_basis"), "eligible words (saved legacy basis)")
+             "abstract-onward-word-units": "words from the Abstract onward",
+             "eligible-manuscript-word-units": "eligible manuscript words after exclusions"}.get(metrics.get("score_basis"), "eligible words (saved legacy basis)")
     body += f"<p class='muted'>{metrics.get('overlapping_words', 0)} unique matching words / {denominator} {basis}. Source percentages are not additive. Algorithm {html.escape(str(report.get('algorithm_version', 'legacy')))}.</p>"
+    if metrics.get("score_basis") == "eligible-manuscript-word-units":
+        body += (f"<p class='muted'>Word accounting: {metrics.get('total_words', 0)} total; "
+                 f"{metrics.get('front_matter_words', 0)} front matter excluded; {metrics.get('scoped_words', 0)} in scope; "
+                 f"{metrics.get('excluded_bibliography_words', 0)} bibliography, {metrics.get('excluded_quotation_words', 0)} quotation "
+                 f"and {metrics.get('other_excluded_manuscript_words', 0)} other words excluded within scope; "
+                 f"{denominator} eligible. Exclusions are counted once; unmatched eligible words remain in the denominator. "
+                 f"Score policy: {html.escape(str(metrics.get('score_policy_version', '')))}.</p>")
     scope = (report.get("settings") or {}).get("manuscript_scope") or {}
     if scope.get("applied") == "abstract-onward":
         body += f"<p class='muted'>Analysis starts at the Abstract heading on page {html.escape(str(scope.get('start_page')))}; {html.escape(str(metrics.get('front_matter_words', 0)))} preceding front-matter words excluded. Original PDF pages are preserved.</p>"
