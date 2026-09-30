@@ -313,3 +313,38 @@ def test_validation_of_profile_and_limits():
                    {"manuscript_scope": "unknown"}, {"config": {"max_gap": 6}}):
         with pytest.raises(ValueError):
             report("a b c", "a b c", **kwargs)
+
+
+def test_original_pdf_highlights_actual_equal_words_not_gap_bounds(tmp_path):
+    import hashlib
+    import pymupdf
+    from buna.pdf_reports import generate_pdf
+
+    text = "a b c d x x e f g y h i j"
+    original = tmp_path / "original.pdf"
+    with pymupdf.open() as pdf:
+        page = pdf.new_page()
+        page.insert_text((60, 90), text, fontsize=14)
+        pdf.save(original)
+    with pymupdf.open(original) as pdf:
+        target = document(pdf[0].get_text())
+        original_words = pdf[0].get_text("words")
+    result = improved_report(target, [{"id": "s", "document": document("a b c d q e f g r h i j")}])
+    result["papers"] = [{"id": "s", "source_number": 1, "title": "Original synthetic source", "status": "compared"}]
+    output = tmp_path / "report.pdf"
+    mapping = generate_pdf({"original": str(original), "report": result, "job": {
+        "filename": "Original synthetic.pdf", "document": target,
+        "manuscript_sha256": hashlib.sha256(original.read_bytes()).hexdigest(),
+    }}, output)
+    assert mapping["unmapped_regions"] == 0
+    with pymupdf.open(output) as pdf:
+        page = pdf[mapping["summary_pages"]]
+        quads = []
+        for annot in page.annots() or []:
+            if annot.type[1] == "Highlight":
+                points = annot.vertices
+                quads.extend(pymupdf.Quad(points[i:i + 4]).rect for i in range(0, len(points), 4))
+        assert quads
+        for x0, y0, x1, y1, word, *_ in original_words:
+            marked = any(quad.intersects(pymupdf.Rect(x0, y0, x1, y1)) for quad in quads)
+            assert marked is (word not in {"x", "y"}), word
