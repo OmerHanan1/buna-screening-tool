@@ -151,3 +151,22 @@ def test_retired_bytes_are_charged_until_confirmed_cleanup(monkeypatch):
     monkeypatch.setattr("buna.shared_library.time.time", lambda: later)
     service.collect_retired()
     assert service.save(original(), document(), "New explicit upload")["state"] == "saved"
+
+
+def test_cloud_verifier_never_mutates_production_catalog(monkeypatch):
+    from types import SimpleNamespace
+    from deploy import verify_library_removal
+    store = MemoryBlobs()
+    store.write("catalog-v1.json", b"untouched synthetic production marker", None)
+    store.client = SimpleNamespace(list_blobs=lambda name_starts_with: [
+        SimpleNamespace(name=name) for name in store.values if name.startswith(name_starts_with)])
+    monkeypatch.setattr(verify_library_removal, "AzureBlobStore", lambda *_: store)
+    for key in ("BUNA_SHARED_ACCOUNT_URL", "BUNA_SHARED_CONTAINER", "BUNA_SHARED_IDENTITY_CLIENT_ID"):
+        monkeypatch.setenv(key, "synthetic")
+    proof = verify_library_removal.verify()
+    assert proof["actual_msi_old_blobs_deleted"]
+    restarted = verify_library_removal.verify(proof["namespace"], cleanup=True)
+    assert restarted["restart_bundled_still_removed"]
+    assert restarted["only_validation_namespace_cleaned"]
+    assert list(store.values) == ["catalog-v1.json"]
+    assert store.values["catalog-v1.json"][0] == b"untouched synthetic production marker"

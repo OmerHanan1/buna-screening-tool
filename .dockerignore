@@ -13,6 +13,7 @@
 !deploy/smoke_public.py
 !deploy/benchmark_hosted.py
 !deploy/verify_shared.py
+!deploy/verify_library_removal.py
 !release-context
 !release-context/wheels
 !release-context/wheels/*.whl
