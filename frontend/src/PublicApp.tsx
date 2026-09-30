@@ -193,7 +193,7 @@ export default function PublicApp() {
           if (!stopped) updateSourceSave(file, { ...value, state: "failed", reason: (e as Error).message });
         }
       } } finally { polling = false; }
-    }, 2000);
+    }, 5000);
     const warn = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
     window.addEventListener("beforeunload", warn);
     return () => { stopped = true; window.clearInterval(timer); window.removeEventListener("beforeunload", warn); };
