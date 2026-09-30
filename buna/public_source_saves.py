@@ -267,6 +267,8 @@ def install_source_saves(app, *, shared, root, connect, session, lock, gate, act
     def cancel(receipt: str, request: Request):
         with lock:
             row = owned(receipt, session(request))
+            if row["state"] == "receiving":
+                raise HTTPException(409, "The upload is still arriving. Wait for its queued receipt before cancelling.")
             if row["state"] in {"saving", "saved", "already-present"}:
                 raise HTTPException(409, "This paper is being committed or is already saved. Removing it from a comparison does not delete it from the shared library.")
             update(receipt, "cancelled", "Saving cancelled.")

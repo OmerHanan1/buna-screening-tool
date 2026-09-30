@@ -142,3 +142,21 @@ def test_parse_failure_has_receipt_and_no_ready_entry(tmp_path, monkeypatch):
         result = wait(client, response.json()["id"], headers)
         assert result["state"] == "failed" and result["reason"]
     assert not json.loads(blobs.values["catalog-v1.json"][0])["papers"]
+
+
+def test_cancel_does_not_acknowledge_an_upload_still_arriving(tmp_path, monkeypatch):
+    import inspect
+    blobs = MemoryBlobs()
+    app = app_for(tmp_path, monkeypatch, blobs)
+    endpoint = next(r.endpoint for r in app.routes if getattr(r, "path", "") == "/api/public/source-saves" and "POST" in r.methods)
+    connect = inspect.getclosurevars(endpoint).nonlocals["connect"]
+    with TestClient(app) as client:
+        headers = session(client)
+        owner = hashlib.sha256(headers["Authorization"].removeprefix("Bearer ").encode()).hexdigest()
+        receipt = str(uuid4())
+        with connect() as db:
+            db.execute("INSERT INTO source_saves VALUES(?,?,?,'receiving','','','',10000,?,1)",
+                       (receipt, owner, time.time(), str(uuid4())))
+        response = client.delete("/api/public/source-saves/" + receipt, headers=headers)
+        assert response.status_code == 409
+        assert "still arriving" in response.json()["detail"]
