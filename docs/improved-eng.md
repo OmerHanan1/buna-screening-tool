@@ -31,10 +31,11 @@ Explicit bracketed numeric and author-year/narrative citation syntax is masked
 in the **original word ledger**. It is not deleted or compacted. Recognition
 is syntactic, not a guess about every surname or year in prose.
 
-Citation-only seeds cannot retrieve candidates. A mixed prose/citation exact
-three-word seed may retrieve a candidate, but its citation words do not qualify
-any equal-pair graph nodes. This follows "citations must not form the seed by
-themselves" without adding a new all-content or all-prose anchor restriction.
+A valid seed contains three consecutive equal **non-citation** words at their
+original positions on both sides. Mixed citation/prose and citation-only seeds
+are rejected, including at passage boundaries. Citations are not removed to
+create artificial three-word adjacency. Function words and literal numbers in
+ordinary prose remain eligible; this is not a content-word strength requirement.
 
 Every accepted Similar alignment must independently contain nine equal
 non-citation word pairs. Citation tokens on either side cannot increase the
@@ -44,14 +45,19 @@ matches spanning sixteen original tokens fail 60% density. Citations therefore
 cannot rescue prose that fails the original gap/density rules.
 
 Citation text can remain in passage context but is not painted as qualifying
-Similar evidence. Diagnostic `citation_matches` reports citation pairs present
-in the actual saved alignment, not a guessed pairing of surrounding citations.
-For Similar this count is zero by construction; `citation_tokens_inside_span`
-separately exposes the citation material consuming the original span.
+Similar evidence. `qualifying_aligned_pairs` are the pairs that satisfy the
+model's qualification rule. `raw_aligned_pairs` may additionally include equal
+citation pairs aligned inside already accepted gaps for diagnostics only.
+`citation_matches` reports those actual diagnostic pairs, while
+`citation_tokens_inside_span` counts all citation material inside the span.
+All Similar gaps and density numerators use only qualifying non-citation pairs,
+never these extra raw pairs. Raw diagnostic pairing cannot rescue a failed match.
 
 **Exact matching is unchanged**, including its treatment of citation text inside
 contiguous exact runs of at least nine normalized words. Exact diagnostic rows
-explicitly identify this exception; the citation correction applies to Similar,
+explicitly identify this exception: seven prose words plus two contiguous equal
+citation words qualify as nine Exact words, but not nine Similar words.
+The citation correction applies to Similar,
 not a silent modification of the independent Exact path.
 
 ## Diagnostics and source completion

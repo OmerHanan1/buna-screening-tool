@@ -4,13 +4,12 @@ from __future__ import annotations
 import hashlib
 import math
 import time
-from bisect import bisect_left, bisect_right
 from collections import defaultdict
 from dataclasses import asdict, dataclass
 from typing import Callable, Iterator
 from buna.citation_tokens import citation_mask
 from buna.span_evaluation import ledger_sha256
-from buna.match_diagnostics import alignment_details
+from buna.match_diagnostics import alignment_details, raw_citation_pairs
 
 from buna.classified import (
     _attribution, _exact_runs, _regions, _side, tokens,
@@ -79,8 +78,8 @@ def _seed_ends(path: Path) -> list[int]:
     return ends
 
 
-def valid(path: Path, seed_bounds=None) -> bool:
-    if len(path) < 9 or not (_seed_ends(path) if seed_bounds is None else seed_bounds):
+def valid(path: Path) -> bool:
+    if len(path) < 9 or not _seed_ends(path):
         return False
     if any(b[0] <= a[0] or b[1] <= a[1] for a, b in zip(path, path[1:])):
         return False
@@ -90,61 +89,34 @@ def valid(path: Path, seed_bounds=None) -> bool:
             and 5 * len(path) >= 3 * info["source_span"])
 
 
-def _windows(path: Path, check: Callable[[], None], seed_bounds=None) -> Iterator[Path]:
+def _windows(path: Path, check: Callable[[], None]) -> Iterator[Path]:
     """All inclusion-maximal valid windows of one gap-legal monotone path."""
     check()
     if len(path) < 9:
         return
-    bounds = [(end - 2, end) for end in _seed_ends(path)] if seed_bounds is None else seed_bounds
-    if not bounds:
+    ends = _seed_ends(path)
+    if not ends:
         return
-    if valid(path, bounds):
+    if valid(path):
         yield path
         return
     # A failed density prefix may recover; only containing valid windows dominate.
-    earliest = {}
-    for start, end in bounds:
-        earliest[start] = min(earliest.get(start, len(path)), end)
-    required = [len(path)] * len(path)
-    minimum = len(path)
-    for start in range(len(path) - 1, -1, -1):
-        minimum = min(minimum, earliest.get(start, len(path)))
-        required[start] = minimum
-    covered_end = -1
+    covered_end, seed_cursor = -1, 0
     for start in range(len(path) - 8):
         check()
-        if required[start] == len(path):
+        while seed_cursor < len(ends) and ends[seed_cursor] < start + 2:
+            seed_cursor += 1
+        if seed_cursor == len(ends):
             break
         for end in range(len(path) - 1, max(start + 7, covered_end), -1):
             check()
             count = end - start + 1
-            if (required[start] <= end
+            if (ends[seed_cursor] <= end
                     and 5 * count >= 3 * (path[end][0] - path[start][0] + 1)
                     and 5 * count >= 3 * (path[end][1] - path[start][1] + 1)):
                 covered_end = end
                 yield path[start:end + 1]
                 break
-
-
-def _retrieval_bounds(path, mw, sw, m_cited, s_cited, check):
-    """Mixed prose/citation seeds retrieve, but citation-only seeds never do."""
-    positions = set(path)
-    mpos, spos = [a for a, _ in path], [b for _, b in path]
-    bounds = set()
-    for a, b in path:
-        check()
-        for offset in (0, 1, 2):
-            i, j = a - offset, b - offset
-            if i < mpos[0] or j < spos[0] or i + 2 > mpos[-1] or j + 2 > spos[-1]:
-                continue
-            if mw[i:i + 3] != sw[j:j + 3]:
-                continue
-            prose = [(i + k, j + k) for k in range(3) if not m_cited[i + k] and not s_cited[j + k]]
-            if prose and all(pair in positions for pair in prose):
-                first = min(bisect_right(mpos, i) - 1, bisect_right(spos, j) - 1)
-                last = max(bisect_left(mpos, i + 2), bisect_left(spos, j + 2))
-                bounds.add((first, last))
-    return sorted(bounds)
 
 
 def _neighbors(pair: Pair, mw: list[str], sw: list[str], mr: list[int], sr: list[int],
@@ -188,7 +160,7 @@ def _paths(graph: dict[Pair, tuple[Pair, ...]], check: Callable[[], None]) -> It
 def search(mw: list[str], sw: list[str], m_ok: list[bool], s_ok: list[bool],
            check: Callable[[], None], *, working_bytes: int = WORKING_INDEX_BYTES,
            m_cited: list[bool] | None = None, s_cited: list[bool] | None = None) -> Iterator[Path]:
-    """Original v1 search; citations cannot form seeds alone or qualify graph nodes."""
+    """Original v1 search; citation tokens cannot seed or qualify graph nodes."""
     m_cited = m_cited if m_cited is not None else [False] * len(mw)
     s_cited = s_cited if s_cited is not None else [False] * len(sw)
     if not (len(mw) == len(m_ok) == len(m_cited) and len(sw) == len(s_ok) == len(s_cited)):
@@ -198,7 +170,7 @@ def search(mw: list[str], sw: list[str], m_ok: list[bool], s_ok: list[bool],
     index_bytes = 0
     for j in range(len(sw) - 2):
         check()
-        if all(s_ok[j:j + 3]) and sr[j] == sr[j + 2] and not all(s_cited[j:j + 3]):
+        if all(s_ok[j:j + 3]) and sr[j] == sr[j + 2] and not any(s_cited[j:j + 3]):
             index_bytes += 384
             if index_bytes > working_bytes:
                 raise SearchLimit("index-memory-limit", "Trigram index reached the working-memory budget.")
@@ -206,15 +178,14 @@ def search(mw: list[str], sw: list[str], m_ok: list[bool], s_ok: list[bool],
     seen: set[Pair] = set()
     for i in range(len(mw) - 2):
         check()
-        if not all(m_ok[i:i + 3]) or mr[i] != mr[i + 2] or all(m_cited[i:i + 3]):
+        if not all(m_ok[i:i + 3]) or mr[i] != mr[i + 2] or any(m_cited[i:i + 3]):
             continue
         for j in table.get(tuple(mw[i:i + 3]), ()):
             check()
-            prose = [(i + k, j + k) for k in range(3) if not m_cited[i + k] and not s_cited[j + k]]
-            if not prose or prose[0] in seen:
+            if (i, j) in seen:
                 continue
-            frontier = [prose[0]]
-            nodes = {prose[0]}
+            frontier = [(i, j)]
+            nodes = {(i, j)}
             graph: dict[Pair, tuple[Pair, ...]] = {}
             while frontier:
                 check()
@@ -230,8 +201,7 @@ def search(mw: list[str], sw: list[str], m_ok: list[bool], s_ok: list[bool],
                         nodes.add(neighbor)
                         frontier.append(neighbor)
             for path in _paths(graph, check):
-                seeds = _retrieval_bounds(path, mw, sw, m_cited, s_cited, check)
-                yield from _windows(path, check, seeds)
+                yield from _windows(path, check)
             seen.update(nodes)
 
 
@@ -404,7 +374,8 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
             if not all(eligible) or not all(s_ok):
                 for path in search(mw, sw, [True] * len(mw), [True] * len(sw), budget,
                                    m_cited=m_cited, s_cited=s_cited, working_bytes=WORKING_INDEX_BYTES):
-                    if not all(eligible[path[0][0]:path[-1][0] + 1]) or not all(s_ok[path[0][1]:path[-1][1] + 1]):
+                    ma, mb, sa, sb = path[0][0], path[-1][0] + 1, path[0][1], path[-1][1] + 1
+                    if not all(eligible[ma:mb]) or not all(s_ok[sa:sb]):
                         _collect(audit_paths, path, evidence_budget, budget)
                 try:
                     for a, e, b, f in _exact_runs(mw, [True] * len(mw), [0] * len(mw), sw, [True] * len(sw),
@@ -427,12 +398,13 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
             for path in sorted(paths):
                 check()
                 m_positions, s_positions = [p[0] for p in path], [p[1] for p in path]
+                ma, mb, sa, sb = path[0][0], path[-1][0] + 1, path[0][1], path[-1][1] + 1
                 info = measures(path)
                 kind = "exact" if info["matched_words"] == info["manuscript_span"] == info["source_span"] else "similar"
                 # Reserve strings and offset arrays before materializing the report.
                 try:
-                    evidence_budget.add(10240 + 512 * len(path) + 8 * (
-                        mt[path[-1][0]][2] - mt[path[0][0]][1] + st[path[-1][1]][2] - st[path[0][1]][1]))
+                    evidence_budget.add(10240 + 768 * len(path) + 8 * (
+                        mt[mb - 1][2] - mt[ma][1] + st[sb - 1][2] - st[sa][1]))
                 except SearchLimit as exc:
                     if not excluded:
                         row.update(status="compared-with-limits", scored_search_complete=False)
@@ -443,21 +415,21 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
                         row["limits_reached"].append(exc.kind)
                     break
                 passage, attribution = _attribution(manuscript, mt, source, m_positions, quoted, uncertain)
-                m_side = _side(manuscript, mt, m_positions, m_positions[0], m_positions[-1])
-                s_side = _side(document, st, s_positions, s_positions[0], s_positions[-1])
+                m_side = _side(manuscript, mt, m_positions, ma, mb - 1)
+                s_side = _side(document, st, s_positions, sa, sb - 1)
                 reasons = []
-                if any(front[path[0][0]:path[-1][0] + 1]):
+                if any(front[ma:mb]):
                     reasons.append("front-matter")
-                if any(bib[path[0][0]:path[-1][0] + 1]):
+                if any(bib[ma:mb]):
                     reasons.append("bibliography")
-                if exclude_quotes and any(quoted[path[0][0]:path[-1][0] + 1]):
+                if exclude_quotes and any(quoted[ma:mb]):
                     reasons.append("recognized-quotation")
-                if not all(s_ok[path[0][1]:path[-1][1] + 1]):
+                if not all(s_ok[sa:sb]):
                     reasons.append("source-bibliography")
                 match = {
                     "source_id": sid, "source_number": numbers[sid], "source_content_sha256": row["source_content_sha256"],
                     "kind": "exact" if kind == "exact" else "near-verbatim", "match_kind": kind,
-                    "manuscript": {**passage, "word_start": m_positions[0], "word_end": m_positions[-1] + 1,
+                    "manuscript": {**passage, "word_start": ma, "word_end": mb,
                                    "equal_spans": m_side["equal_spans"]},
                     "source": {**s_side, "match_start": s_side["start"], "match_end": s_side["end"],
                                "highlights": [[a - s_side["start"], b - s_side["start"]] for a, b in s_side["equal_spans"]]},
@@ -470,8 +442,12 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
                               "source_unmatched": info["source_span"] - len(path)},
                     "order": {"out_of_order_blocks": 0},
                 }
+                raw_pairs = raw_citation_pairs(path, mw, sw, m_cited, s_cited) if kind == "similar" else path
+                match["raw_aligned_pairs"] = [list(pair) for pair in raw_pairs]
+                match["qualifying_aligned_pairs"] = [list(pair) for pair in path]
                 match["diagnostics"] = {
-                    **alignment_details(path, mw, sw, m_cited, s_cited),
+                    **alignment_details(raw_pairs, mw, sw, m_cited, s_cited),
+                    "matched_word_count": len(path), "raw_matched_word_count": len(raw_pairs),
                     "source": sid, "source_content_sha256": row["source_content_sha256"],
                     "match_kind": kind, "exact_citation_policy": "unchanged; citation qualification correction applies to Similar",
                     "scored": not excluded,
@@ -543,7 +519,7 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
                 "manuscript_scope": scope, "improved_eng_config": asdict(cfg),
                 "citation_qualification": {
                     "scope": "Similar only; Exact unchanged",
-                    "seed": "Citation-only seeds prohibited; mixed seeds retrieve without qualifying citation pairs",
+                    "seed": "Three consecutive equal noncitation words at original positions on both sides",
                     "minimum_and_density_numerator": "Noncitation equal pairs only",
                     "gap_and_span_accounting": "Original word positions, including intervening citations",
                 },

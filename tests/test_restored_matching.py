@@ -83,19 +83,23 @@ def test_citation_only_seeds_do_not_retrieve_scattered_prose():
     assert not cited_paths(m, s)
 
 
-def test_mixed_seed_can_retrieve_but_only_prose_qualifies():
+def test_mixed_seed_does_not_receive_citation_credit():
     text = "a b (2020) c d (2021) e f (2022) g h (2023) i j"
-    paths = cited_paths(text, text)
-    assert paths and len(paths[0]) == 10
-    from buna.match_diagnostics import alignment_details
-    ledger = tokens(text)
-    words = [w for w, *_ in ledger]
-    cited = citation_mask(text, ledger)
-    diagnostic = alignment_details(paths[0], words, words, cited, cited)
-    assert diagnostic["seed"] is not None
-    assert diagnostic["matched_non_citation_words"] == 10
-    assert diagnostic["manuscript_density"] == 10 / 14
-    assert diagnostic["citation_matches"]["count"] == 0
+    assert not cited_paths(text, text)
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("masked_side", ["manuscript", "source", "both"])
+def test_mixed_boundary_seed_rejected_in_original_coordinates(reverse, masked_side):
+    m = "1 2 a x b c y d e z f g q h i".split()
+    s = "1 2 a u b c v d e w f g r h i".split()
+    mask = [True, True] + [False] * 13
+    if reverse:
+        m, s, mask = list(reversed(m)), list(reversed(s)), list(reversed(mask))
+    paths = list(search(m, s, [True] * 15, [True] * 15, lambda: None,
+                        m_cited=mask if masked_side != "source" else [False] * 15,
+                        s_cited=mask if masked_side != "manuscript" else [False] * 15))
+    assert not paths
 
 
 def test_citation_inside_valid_match_is_diagnostic_not_scored():
@@ -122,6 +126,29 @@ def test_exact_citation_exception_is_explicit_and_unchanged():
     exact = next(m for m in result["matches"] if m["match_kind"] == "exact")
     assert exact["diagnostics"]["citation_matches"]["count"] == 2
     assert "applies to Similar" in exact["diagnostics"]["exact_citation_policy"]
+
+
+def test_seven_prose_plus_two_citations_exact_accepts_similar_rejects():
+    phrase = "one two three four (Smith 2020) five six seven"
+    exact = compare(phrase, phrase)
+    assert exact["metrics"]["exact_words"] == 9
+    assert exact["metrics"]["overlapping_words"] == 9
+    flexible = compare(phrase.replace("five", "x five"), phrase.replace("five", "y five"))
+    assert flexible["metrics"]["overlapping_words"] == 0
+
+
+def test_raw_citation_equal_pairs_never_shorten_qualifying_gaps():
+    m = "a b c d (Smith 2020) x e f g h i"
+    s = "a b c d (Smith 2020) y e f g h i"
+    result = compare(m, s)
+    match = next(item for item in result["matches"] if item["match_kind"] == "similar")
+    assert len(match["qualifying_aligned_pairs"]) == 9
+    assert len(match["raw_aligned_pairs"]) == 11
+    assert match["matched_words"] == match["diagnostics"]["matched_word_count"] == 9
+    assert match["diagnostics"]["citation_matches"]["count"] == 2
+    assert match["diagnostics"]["maximum_gap"] == 3
+    assert match["diagnostics"]["manuscript_density"] == 9 / 12
+    assert match["scored_word_positions"] == [0, 1, 2, 3, 7, 8, 9, 10, 11]
 
 
 def test_small_exhaustive_citation_oracle_keeps_alternative_legal_paths():
