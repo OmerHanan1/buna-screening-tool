@@ -67,7 +67,7 @@ def test_removed_shared_source_keeps_snapshot_then_gc_reclaims_only_old_objects(
     assert service.list()[0]["title"] == "Second"
 
 
-def test_late_duplicate_writer_cannot_publish_after_removal(monkeypatch):
+def test_paused_writer_cannot_be_superseded_even_past_gc_retention(monkeypatch):
     store = MemoryBlobs()
     service = SharedLibrary(store, set())
     data, doc = original(), document()
@@ -82,14 +82,19 @@ def test_late_duplicate_writer_cannot_publish_after_removal(monkeypatch):
     with ThreadPoolExecutor(max_workers=1, thread_name_prefix="delayed") as pool:
         slow = pool.submit(service.save, data, doc, "Delayed", expected_version="0")
         assert entered.wait(5)
-        service.save(data, doc, "First")
-        paper = service.list()[0]
-        service.remove(paper["sha256"], "0")
+        with pytest.raises(SharedLibraryError, match="unfinished writes"):
+            service.save(data, doc, "Duplicate")
+        digest = hashlib.sha256(data).hexdigest()
+        with pytest.raises(SourceNotFound):
+            service.remove(digest, "0")
+        after_retention = time.time() + RETIRE_SECONDS + 1
+        monkeypatch.setattr("buna.shared_library.time.time", lambda: after_retention)
+        service.collect_retired()
+        with pytest.raises(SharedLibraryError, match="unfinished writes"):
+            SharedLibrary(store, set()).save(data, doc, "Late duplicate")
         release.set()
-        with pytest.raises(LibraryChanged):
-            slow.result()
-    catalog, _ = service._read()
-    assert service.list() == [] and len(catalog["retired"]) == 1
+        assert slow.result()["state"] == "saved"
+    service.remove(digest, "0")
     later = time.time() + RETIRE_SECONDS + 1
     monkeypatch.setattr("buna.shared_library.time.time", lambda: later)
     service.collect_retired()

@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import logging
 import math
 import re
 import time
@@ -21,6 +22,7 @@ CATALOG = "catalog-v1.json"
 _SHA = re.compile(r"^[0-9a-f]{64}$")
 _VERSION = re.compile(r"^(0|[0-9a-f]{32})$")
 RETIRE_SECONDS = 2 * 3600
+logger = logging.getLogger(__name__)
 
 
 class SharedLibraryError(ValueError):
@@ -183,6 +185,10 @@ class SharedLibrary:
                 raise SharedLibraryError("Shared catalog contains an invalid entry.")
             if not _VERSION.fullmatch(str(item.get("object_version", "0"))):
                 raise SharedLibraryError("Shared object version is invalid.")
+            if item.get("writer") is not None and not re.fullmatch(r"[0-9a-f]{32}", str(item["writer"])):
+                raise SharedLibraryError("Shared writer ownership is invalid.")
+            if item["state"] == "ready" and item.get("writer"):
+                raise SharedLibraryError("A ready source cannot have an unfinished writer.")
             if (type(item.get("original_bytes")) is not int or not 0 < item["original_bytes"] <= MAX_ORIGINAL_BYTES
                     or type(item.get("parsed_bytes")) is not int or not 0 < item["parsed_bytes"] <= MAX_PARSED_BYTES):
                 raise SharedLibraryError("Shared catalog size metadata is invalid.")
@@ -334,6 +340,20 @@ class SharedLibrary:
             else:
                 raise SharedLibraryError("Retired files were removed, but quota release needs retry.")
 
+    def _release_writer(self, digest, writer):
+        for _ in range(8):
+            catalog, etag = self._read()
+            current = catalog["papers"].get(digest)
+            if not current or current.get("writer") != writer:
+                return
+            current.pop("writer")
+            try:
+                self._cas(catalog, etag)
+                return
+            except Conflict:
+                continue
+        raise SharedLibraryError("The unfinished writer needs operator review before retry.")
+
     def record_save_event(self, receipt: str, state: str, code: str = ""):
         """Bounded operator diagnostics, without visitor identity or document metadata."""
         if not re.fullmatch(r"[0-9a-f-]{36}", receipt) or state not in {
@@ -384,9 +404,10 @@ class SharedLibrary:
             raise SharedLibraryError("The parsed source exceeds the shared-cache size limit.")
         parsed_sha = hashlib.sha256(parsed).hexdigest()
         title = title[:255]
+        writer = uuid4().hex
         blank_pages = sum(not page["text"].strip() for page in document["pages"])
         item = {
-            "state": "pending", "sha256": digest, "parsed_sha256": parsed_sha, "object_version": expected_version,
+            "state": "pending", "sha256": digest, "parsed_sha256": parsed_sha, "object_version": expected_version, "writer": writer,
             "original_bytes": len(original), "parsed_bytes": len(parsed), "title": title,
             "created_at": time.time(), "parser_profile": parser_profile(),
             "version": f"Shared upload · {len(document['pages'])} PDF pages"
@@ -407,8 +428,15 @@ class SharedLibrary:
                     return {"state": "already-present", "sha256": digest}
                 if existing["parsed_sha256"] != parsed_sha or existing["parser_profile"] != parser_profile():
                     raise SharedLibraryError("A pending immutable version needs operator review; it was not replaced.")
-                reserved = existing
-                break
+                if existing.get("writer"):
+                    raise SharedLibraryError("Another save owns this source's unfinished writes. Retry after it finishes; an interrupted writer may need operator review.")
+                existing["writer"] = writer
+                try:
+                    self._cas(catalog, etag)
+                    reserved = existing
+                    break
+                except Conflict:
+                    continue
             catalog["reservations"] = [t for t in catalog["reservations"] if isinstance(t, (int, float)) and t >= time.time() - 86400]
             if len(catalog["reservations"]) >= MAX_NEW_PER_DAY:
                 raise SharedLibraryError("The shared library's daily new-paper quota is reached.")
@@ -427,29 +455,34 @@ class SharedLibrary:
                 continue
         if reserved is None:
             raise SharedLibraryError("The shared catalog is busy; the save was not completed.")
-        # Reservations remain counted on failure. No unaccounted orphan bytes or
-        # falsely ready entries; a later identical upload can resume this save.
-        original_path, parsed_path = self._object_paths(reserved)
-        self.store.immutable(original_path, original)
-        self.store.immutable(parsed_path, parsed)
-        for _ in range(8):
-            catalog, etag = self._read()
-            if self._version(catalog, digest) != expected_version:
-                raise LibraryChanged("This paper was removed while saving. Its old save will not restore it.")
-            current = catalog["papers"].get(digest)
-            if not current or current["parsed_sha256"] != parsed_sha:
-                raise SharedLibraryError("The shared reservation changed; the save was not confirmed.")
-            if current["state"] == "ready":
-                return {"state": "already-present", "sha256": digest}
-            current["state"] = "ready"
-            if digest in catalog.get("removals", {}):
-                catalog["removals"][digest]["removed"] = False
+        # Exclusive durable ownership has no expiry: a paused writer cannot be
+        # superseded, followed by removal/GC, then recreate unaccounted blobs.
+        try:
+            original_path, parsed_path = self._object_paths(reserved)
+            self.store.immutable(original_path, original)
+            self.store.immutable(parsed_path, parsed)
+            for _ in range(8):
+                catalog, etag = self._read()
+                if self._version(catalog, digest) != expected_version:
+                    raise LibraryChanged("This paper was removed while saving. Its old save will not restore it.")
+                current = catalog["papers"].get(digest)
+                if not current or current["parsed_sha256"] != parsed_sha or current.get("writer") != writer:
+                    raise SharedLibraryError("The shared writer reservation changed; the save was not confirmed.")
+                current["state"] = "ready"
+                current.pop("writer")
+                if digest in catalog.get("removals", {}):
+                    catalog["removals"][digest]["removed"] = False
+                try:
+                    self._cas(catalog, etag)
+                    return {"state": "saved", "sha256": digest}
+                except Conflict:
+                    continue
+            raise SharedLibraryError("The files were stored, but catalog publication was not confirmed.")
+        finally:
             try:
-                self._cas(catalog, etag)
-                return {"state": "saved", "sha256": digest}
-            except Conflict:
-                continue
-        raise SharedLibraryError("The files were stored, but catalog publication was not confirmed.")
+                self._release_writer(digest, writer)
+            except Exception as exc:
+                logger.warning("Shared writer release needs operator review (%s).", type(exc).__name__)
 
     def materialize(self, paper: dict, folder: Path):
         digest, parsed_sha = paper["sha256"], paper["parsed_sha256"]

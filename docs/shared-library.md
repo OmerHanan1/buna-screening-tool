@@ -44,11 +44,15 @@ explicit upload can add the same content again under the new generation; retries
 of an earlier removal cannot delete that newly added version. Stale comparison
 selections are rejected for refresh rather than silently substituted.
 
-The catalog format is additive/backwards-readable. Its first removal creates one
+Existing catalogs are read without a destructive migration. The additive format's
+first removal creates one
 private, immutable `catalog-before-removals-v1.json` metadata backup, not a backup
 of erased source files. A bounded removal ledger stores source hash, generation,
 time and kind, without email, capability or document text. Library reads fail
 closed during catalog outages rather than resurrecting hidden bundled papers.
+After the first removal, do not roll back to a release that ignores removal
+generations: a rollback must preserve the removal-aware list, admission and save
+guards even though older software can parse the underlying JSON.
 
 ## Readiness, deduplication and snapshots
 
@@ -102,6 +106,12 @@ exceed admitted quotas through last-writer-wins updates. Failed reservations
 remain counted, bounding orphan storage; an identical upload or an authorized
 retry resumes the save. Operator review is needed to reclaim abandoned
 reservations or change immutable versions. There is no silent unbounded cleanup.
+
+Pending object writes have an exclusive durable writer owner. Duplicate writers
+cannot take over on a timer: that could allow a paused writer to recreate old
+blobs after cleanup. Normal failures release ownership for retry. If a process is
+terminated mid-write, an operator must verify that writer has permanently stopped
+before releasing its claim; unfinished bytes remain quota-accounted meanwhile.
 
 ## Failure and cancellation behavior
 
