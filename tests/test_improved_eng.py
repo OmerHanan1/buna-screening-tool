@@ -76,25 +76,22 @@ def test_seed_and_minimum():
         assert result["metrics"]["score_denominator_words"] == size
 
 
-def test_ordered_four_three_three_and_actual_mask_union():
+def test_v1_weak_islands_no_longer_qualify_as_similar():
     m = "a b c d x x e f g y h i j"
     s = "a b c d q e f g r h i j"
     result = improved_report(document(m), [
         {"id": "z", "document": document(s)}, {"id": "a", "document": document(s + " ending")},
     ])
-    assert result["metrics"]["overlapping_words"] == 10
+    assert result["metrics"]["overlapping_words"] == 0
     assert result["metrics"]["eligible_words"] == 13
     assert result["metrics"]["exact_words"] == 0
-    for match in result["matches"]:
-        assert match["scored_word_positions"] == [0, 1, 2, 3, 6, 7, 8, 10, 11, 12]
-        assert match["manuscript_max_gap"] == 2
-        assert match["source_max_gap"] == 1
-        assert match["match_kind"] == "similar"
-    assert all(row["overlapping_words"] == 10 for row in result["source_coverage"])
+    assert not result["matches"]
+    assert all(row["overlapping_words"] == 0 for row in result["source_coverage"])
 
 
 def test_exact_subrun_precedence_inside_larger_similar_passage():
-    result = report("a b c d e f g h i x j k l", "a b c d e f g h i y j k l")
+    result = report("red blue green black pink gold silver gray white x tan rust teal",
+                    "red blue green black pink gold silver gray white y tan rust teal")
     assert result["metrics"]["exact_words"] == 9
     assert result["metrics"]["similar_only_words"] == 3
     assert result["metrics"]["overlapping_words"] == 12
@@ -240,7 +237,7 @@ def test_literal_punctuation_and_document_local_hyphen_ledger():
 
 def test_limits_keep_real_exact_evidence_and_mark_unchecked(monkeypatch):
     monkeypatch.setattr(engine, "WORKING_INDEX_BYTES", 1)
-    phrase = "a b c d e f g h i j"
+    phrase = "red blue green black pink gold silver gray white tan"
     result = report(phrase + " unmatched", phrase)
     assert result["metrics"]["overlapping_words"] == 10
     assert result["metrics"]["truncated"]
@@ -273,14 +270,14 @@ def test_cancellation_inside_repetitive_graph():
 
 
 def test_audit_limit_is_not_scored_search_failure(monkeypatch):
-    original = engine.search
+    original = engine.anchored_paths
 
-    def audit_limit(mw, sw, m_ok, s_ok, check, **kwargs):
+    def audit_limit(mw, sw, m_ok, s_ok, *args, **kwargs):
         if all(m_ok):
             raise engine.SearchLimit("source-time-limit", "Audit budget ended.")
-        yield from original(mw, sw, m_ok, s_ok, check, **kwargs)
+        yield from original(mw, sw, m_ok, s_ok, *args, **kwargs)
 
-    monkeypatch.setattr(engine, "search", audit_limit)
+    monkeypatch.setattr(engine, "anchored_paths", audit_limit)
     result = report('a b c d e f g h i "excluded quote"', "a b c d e f g h i")
     assert result["metrics"]["overlapping_words"] == 9
     assert result["source_coverage"][0]["scored_search_complete"]
@@ -320,16 +317,16 @@ def test_original_pdf_highlights_actual_equal_words_not_gap_bounds(tmp_path):
     import pymupdf
     from buna.pdf_reports import generate_pdf
 
-    text = "a b c d x x e f g y h i j"
+    text = "red blue green black x pink gold silver y tan gray white"
     original = tmp_path / "original.pdf"
     with pymupdf.open() as pdf:
         page = pdf.new_page()
-        page.insert_text((60, 90), text, fontsize=14)
+        page.insert_text((60, 90), text, fontsize=10)
         pdf.save(original)
     with pymupdf.open(original) as pdf:
         target = document(pdf[0].get_text())
         original_words = pdf[0].get_text("words")
-    result = improved_report(target, [{"id": "s", "document": document("a b c d q e f g r h i j")}])
+    result = improved_report(target, [{"id": "s", "document": document("red blue green black q pink gold silver r tan gray white")}])
     result["papers"] = [{"id": "s", "source_number": 1, "title": "Original synthetic source", "status": "compared"}]
     output = tmp_path / "report.pdf"
     mapping = generate_pdf({"original": str(original), "report": result, "job": {

@@ -430,6 +430,10 @@ class Engine:
                 if mode == "offline" else "Limited to the listed sources.",
             )
             summarize_report(report)
+            if report.get("comparison_model") == "improvedEng":
+                from buna.match_diagnostics import diagnostics_csv
+                report["improved_eng"]["similar_diagnostics_csv"] = diagnostics_csv(report)
+                (folder / "similar-diagnostics.csv").write_text(report["improved_eng"]["similar_diagnostics_csv"], encoding="utf-8")
             write_json(folder / "report.json", report)
             html_temp = folder / "report.html.tmp"
             html_temp.write_text(render_report(report), encoding="utf-8")

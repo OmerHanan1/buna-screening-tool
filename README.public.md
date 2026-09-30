@@ -59,9 +59,12 @@ is not the only cue. The standard model remains the default. Scores and
 normalization can differ, and no superiority or vendor-equivalence claim is made.
 See [the model and limitations](docs/experimental-wording.md).
 
-A third optional **Advanced > improvedEng** model searches ordered lexical
-passages from exact three-word seeds: at least nine equal words, gap at most five
-and density at least 60% on each side. It retains the same eligible-word scoring
+A third optional **Advanced > improvedEng** model keeps exact matching separate
+from Similar passages established by a four-content-word exact anchor and
+bounded extension with local-density and cumulative-gap constraints. Similar
+instances need at least nine qualifying matched words; citations cannot qualify
+them. JSON/CSV diagnostics and complete-corpus word/span evaluation support
+calibration without tuning an aggregate percentage. It retains the same eligible-word scoring
 policy and leaves both existing engines unchanged. It is experimental, may
 report partial coverage on difficult inputs, and makes no Crossref-equivalence
 claim. See [improvedEng rules, audit evidence and limitations](docs/improved-eng.md).

@@ -21,9 +21,9 @@ from buna.pdf_reports import generate_pdf
 
 
 EXACT = "amber birds gather beside quiet rivers during winter mornings while copper sensors record signals".split()
-NEAR = "we used a linear mixed effects model to test whether disgust type affected participants responses".split()
-SOURCE_NEAR = "we used a linear mixed effects model to examine the effect of disgust type on participants responses".split()
-NEAR_EQUAL = {0, 1, 2, 3, 4, 5, 6, 7, 10, 11, 13, 14}
+NEAR = "robust cortical neural signals predict distinct emotional responses among adult volunteers".split()
+SOURCE_NEAR = "robust cortical neural signals predict distinct affective responses among adult volunteers".split()
+NEAR_EQUAL = set(range(len(NEAR))) - {6}
 
 
 def document(words):
@@ -31,7 +31,7 @@ def document(words):
                        for i in range(0, len(words), 600)], "Original synthetic", [])
 
 
-def verify(count=57, words=12000, pdf=True):
+def verify(count=61, words=12000, pdf=True):
     if count < 2 or words < 600:
         raise ValueError("Use at least two sources and 600 words.")
     target_words = [f"targetword{i}" for i in range(words)]
@@ -69,6 +69,9 @@ def verify(count=57, words=12000, pdf=True):
     assert all(row["status"] == "compared" for row in result["source_coverage"])
     assert not result["metrics"]["truncated"]
     assert result["comparison_model"] == "improvedEng"
+    assert result["algorithm_version"] == "improvedEng-v2"
+    assert result["improved_eng"]["calibration_ready"]
+    assert result["improved_eng"]["similar_diagnostics"]
     assert result["metrics"]["score_policy_version"] == "eligible-manuscript-v1"
     assert loads == count
     result["papers"] = sources
@@ -102,7 +105,7 @@ def verify(count=57, words=12000, pdf=True):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--sources", type=int, default=57)
+    parser.add_argument("--sources", type=int, default=61)
     parser.add_argument("--words", type=int, default=12000)
     parser.add_argument("--no-pdf", action="store_true")
     args = parser.parse_args()

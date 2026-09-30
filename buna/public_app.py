@@ -24,7 +24,7 @@ from uuid import uuid4, UUID
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.concurrency import run_in_threadpool
@@ -744,10 +744,17 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
     @app.get("/api/public/jobs/{job_id}/report.{format}")
     def report(job_id: str, format: str, request: Request):
         row = owned(job_id, session(request))
-        if format not in {"pdf", "json"}:
+        if format not in {"pdf", "json", "csv"}:
             raise HTTPException(404)
-        if row["status"] != "complete" and not (format == "json" and row["status"] == "report-failed"):
+        if row["status"] != "complete" and not (format in {"json", "csv"} and row["status"] == "report-failed"):
             raise HTTPException(409, "Report is not ready.")
+        if format == "csv":
+            from buna.match_diagnostics import diagnostics_csv
+            saved = json.loads((results_root / job_id / "report.json").read_text())
+            if "similar_diagnostics" not in saved.get("improved_eng", {}):
+                raise HTTPException(404, "This saved report has no Similar diagnostics.")
+            return Response(diagnostics_csv(saved), media_type="text/csv",
+                            headers={"Content-Disposition": 'attachment; filename="similar-diagnostics.csv"'})
         return FileResponse(results_root / job_id / f"report.{format}", filename=f"paper-overlap-report.{format}",
                             media_type="application/pdf" if format == "pdf" else "application/json")
 

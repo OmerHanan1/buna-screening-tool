@@ -11,7 +11,7 @@ from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -500,6 +500,15 @@ def create_app(data_dir: Path | None = None, config: dict | None = None) -> Fast
                             headers={"X-Buna-Pdf-Unmapped-Ranges": str(mapping["unmapped_regions"]),
                                      "X-Buna-Pdf-Mode": mapping["render_mode"],
                                      "X-Buna-Pdf-Renderer": mapping["renderer_version"]})
+
+    @app.get("/api/jobs/{job_id}/report.csv")
+    def download_diagnostics(job_id: str):
+        from buna.match_diagnostics import diagnostics_csv
+        saved = json.loads(report_path(job_id, "json").read_text())
+        if "similar_diagnostics" not in saved.get("improved_eng", {}):
+            raise HTTPException(404, "This saved report has no Similar diagnostics.")
+        return Response(diagnostics_csv(saved), media_type="text/csv",
+                        headers={"Content-Disposition": 'attachment; filename="similar-diagnostics.csv"'})
 
     @app.get("/api/jobs/{job_id}/report.pdf-mapping.json")
     def pdf_mapping(job_id: str):

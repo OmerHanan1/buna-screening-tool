@@ -375,7 +375,7 @@ export default function PublicApp() {
     }
     finally { setBusy(false); }
   }
-  async function reportFile(format: "json") {
+  async function reportFile(format: "json" | "csv") {
     if (!job || pdfBusy) return;
     setPdfBusy(true); setError("");
     try {
@@ -530,7 +530,7 @@ export default function PublicApp() {
                   <option value="improvedEng">improvedEng · ordered lexical matching (experimental)</option>
                 </select>
                 {model === "classified-v1.1" && <p>Experimental: separates exact wording from bounded word edits/reordering. Scores can differ; no accuracy or Crossref-equivalence claim.</p>}
-                {model === "improvedEng" && <p>Experimental: exact three-word seeds, at least nine equal words, gaps up to five and at least 60% density independently on each side. Order preserved; no semantic matching. Difficult inputs may be partially checked. No verified Crossref-equivalence claim.</p>}
+                {model === "improvedEng" && <p>Experimental: exact matches unchanged. Similar wording requires a four-content-word exact anchor, at least nine qualifying matches and 70% local agreement with cumulative gap limits. Citations cannot qualify Similar matches. Partial results cannot be used to calibrate recall; no verified Crossref equivalence.</p>}
               </details>
             </section>
             <div className="hosted-action-bar"><p id="compare-reason">{busy ? "Uploading your files…" : disabledReason || `Ready to compare against ${comparisonCount} papers.`}</p><button className="hosted-primary" disabled={!!disabledReason || busy} aria-describedby="compare-reason" onClick={compare}>{busy ? "Uploading…" : "Compare papers"}<ArrowRight size={16} aria-hidden="true" /></button></div>
@@ -554,7 +554,8 @@ export default function PublicApp() {
               {job.score_basis === "eligible-manuscript-word-units" && job.word_accounting && <p>{job.word_accounting.overlapping_words} unique matching words / {job.word_accounting.score_denominator_words} eligible manuscript words after exclusions. {job.word_accounting.total_words} total; {job.word_accounting.front_matter_words} front matter excluded; {job.word_accounting.scoped_words} in scope; {job.word_accounting.excluded_bibliography_words} bibliography, {job.word_accounting.excluded_quotation_words} quoted and {job.word_accounting.other_excluded_manuscript_words} other words excluded within scope. Exclusions count once; unmatched eligible words still count. Policy: {job.score_policy_version}.</p>}
               {["abstract-onward-word-units", "all-submitted-word-units"].includes(job.score_basis || "") && job.word_accounting && <p>{job.word_accounting.overlapping_words} matching words / {job.word_accounting.score_denominator_words} {job.score_basis === "abstract-onward-word-units" ? "words from the Abstract onward" : "total submitted word units"}. This saved basis includes bibliography and quotation words in its denominator.</p>}
               {job.classification_counts && <p>{job.classification_counts.exact_words} exact words · {job.classification_counts.similar_only_words} similar-only words. {job.classification_counts.not_fully_checked_words ? `${job.classification_counts.not_fully_checked_words} words are not fully checked.` : `${job.classification_counts.unmatched_words} eligible words had no match found in the checked sources; this is not a finding of originality.`}</p>}
-              {job.warnings?.filter(w => w !== fallbackWarning).map((w, i) => <p key={i}>{w}</p>)}<button onClick={() => reportFile("json")}>Download evidence JSON</button></details>
+              {job.warnings?.filter(w => w !== fallbackWarning).map((w, i) => <p key={i}>{w}</p>)}<button onClick={() => reportFile("json")}>Download evidence JSON</button>
+              {job.algorithm_version === "improvedEng-v2" && <button onClick={() => reportFile("csv")}>Download Similar diagnostics CSV</button>}</details>
             <div className="hosted-bottom-actions"><button onClick={newComparison}>New comparison</button><button className="hosted-text-button" onClick={() => { if (window.confirm("Delete this temporary comparison and its report?")) void remove(); }}>Delete report</button></div>
           </> : <div className="hosted-surface hosted-progress"><h2>{job.status === "cancelled" ? "Comparison cancelled" : job.evidence_available ? "Comparison saved; PDF unavailable" : "Couldn’t finish this comparison"}</h2><p>{job.error || "No report was created."}</p>{job.diagnostic_id && <p className="hosted-report-note">Reference {job.diagnostic_id.slice(0, 8)} · {stages[job.progress?.stage || ""] || "Processing"} · {job.error_code}</p>}<div className="hosted-bottom-actions">{job.evidence_available && <button onClick={() => reportFile("json")}>Download evidence JSON</button>}<button onClick={() => { void remove(); }}>Back to setup</button></div></div>}
         </section>}

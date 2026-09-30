@@ -429,8 +429,10 @@ test(`${model} requires explicit selection and resets for a new comparison`, asy
       return route.fulfill({ status: 202, json: { id: "model-fixture", status: "running" } });
     }
     if (url.pathname.endsWith(".pdf")) return route.fulfill({ contentType: "application/pdf", body: "%PDF-1.7\nSynthetic model fixture" });
+    if (url.pathname.endsWith(".csv")) return route.fulfill({ contentType: "text/csv", body: "source,anchor_length\n1,4\n" });
     return route.fulfill({ json: {
-      id: "model-fixture", status: "complete", comparison_model: postedModel, algorithm_version: postedModel,
+      id: "model-fixture", status: "complete", comparison_model: postedModel,
+      algorithm_version: postedModel === "improvedEng" ? "improvedEng-v2" : postedModel,
       checked: 44, total: 44, overlap_percent: 12.5, score_available: true,
       classification_counts: { exact_words: 9, similar_only_words: 6, unmatched_words: 10, not_fully_checked_words: 0 },
     } });
@@ -442,7 +444,7 @@ test(`${model} requires explicit selection and resets for a new comparison`, asy
   await page.getByText("Advanced", { exact: true }).click();
   await expect(page.getByLabel("Comparison model")).toHaveValue("validated-lexical");
   await page.getByLabel("Comparison model").selectOption(model);
-  await expect(page.getByText(model === "improvedEng" ? /Experimental: exact three-word seeds/ : /Experimental: separates exact wording/)).toBeVisible();
+  await expect(page.getByText(model === "improvedEng" ? /Experimental: exact matches unchanged/ : /Experimental: separates exact wording/)).toBeVisible();
   await page.getByLabel("Your paper", { exact: true }).setInputFiles({ name: "synthetic.txt", mimeType: "text/plain", buffer: Buffer.from("Original synthetic target text.") });
   await page.getByRole("checkbox", { name: /authorized to upload/ }).check();
   await page.getByRole("button", { name: "Compare papers", exact: true }).click();
@@ -452,6 +454,11 @@ test(`${model} requires explicit selection and resets for a new comparison`, asy
   expect(postedModel).toBe(model);
   await page.getByText("Report details and evidence", { exact: true }).click();
   await expect(page.getByText(/9 exact words · 6 similar-only words/)).toBeVisible();
+  if (model === "improvedEng") {
+    const download = page.waitForEvent("download");
+    await page.getByRole("button", { name: "Download Similar diagnostics CSV" }).click();
+    expect((await download).suggestedFilename()).toBe("paper-overlap-report.csv");
+  }
   page.on("dialog", dialog => dialog.accept());
   await page.getByRole("button", { name: "New comparison", exact: true }).click();
   await page.getByText("Advanced", { exact: true }).click();

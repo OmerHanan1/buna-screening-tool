@@ -1,10 +1,4 @@
-"""Opt-in, seeded ordered lexical alignment. No semantic or vendor-model claims.
-
-Search legal equal-word paths, not a single edit-score optimum. Transitive local
-edges may be removed: inserting an equal pair improves density, preserves order,
-and cannot increase either gap. All alternative saturated paths remain searchable.
-Resource exhaustion is explicit; it never turns an unfinished search into no match.
-"""
+"""Opt-in exact matches and precision-first anchored extension; not a vendor model."""
 from __future__ import annotations
 
 import hashlib
@@ -13,6 +7,8 @@ import time
 from collections import defaultdict
 from dataclasses import asdict, dataclass
 from typing import Callable, Iterator
+from buna.anchored_matching import PROFILE, anchored_paths, citation_mask
+from buna.span_evaluation import ledger_sha256
 
 from buna.classified import (
     _attribution, _exact_runs, _regions, _side, tokens,
@@ -28,7 +24,7 @@ from buna.score_policy import (
 )
 
 MODEL_ID = "improvedEng"
-VERSION = "improvedEng-v1"
+VERSION = "improvedEng-v2"
 NORMALIZATION_VERSION = "nfkc-casefold-literal-numeric-document-local-hyphens-v1"
 WORKING_INDEX_BYTES = 128 * 1024 * 1024
 Pair = tuple[int, int]
@@ -37,16 +33,16 @@ Path = tuple[Pair, ...]
 
 @dataclass(frozen=True)
 class Config:
-    anchor_size: int = 3
+    anchor_size: int = 4
     min_matched_words: int = 9
-    max_gap: int = 5
-    min_region_similarity: float = 0.60
+    max_gap: int = 2
+    min_region_similarity: float = 0.70
     max_total_span: int | None = None
 
     def __post_init__(self):
-        if (self.anchor_size != 3 or self.min_matched_words != 9 or self.max_gap != 5
-                or self.min_region_similarity != 0.60 or self.max_total_span is not None):
-            raise ValueError("improvedEng-v1 uses the fixed reviewed 3/9/5/0.60 profile with no span cap.")
+        if (self.anchor_size != 4 or self.min_matched_words != 9 or self.max_gap != 2
+                or self.min_region_similarity != 0.70 or self.max_total_span is not None):
+            raise ValueError("improvedEng-v2 uses the provisional anchored 4/9/2/0.70 profile with no span cap.")
 
 
 class SearchLimit(Exception):
@@ -159,7 +155,7 @@ def _paths(graph: dict[Pair, tuple[Pair, ...]], check: Callable[[], None]) -> It
 
 def search(mw: list[str], sw: list[str], m_ok: list[bool], s_ok: list[bool],
            check: Callable[[], None], *, working_bytes: int = WORKING_INDEX_BYTES) -> Iterator[Path]:
-    """Enumerate seeded compatible passages; no band, top-K, or sentence cutoff."""
+    """Frozen v1 reference for oracle regression only; v2 reports never call this."""
     mr, sr = _regions(m_ok), _regions(s_ok)
     table: dict[tuple[str, ...], list[int]] = defaultdict(list)
     index_bytes = 0
@@ -259,6 +255,7 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
     # A stable manuscript ledger must not depend on source order or availability.
     mt = tokens(text, _line_join_words([text]), check)
     mw = [t[0] for t in mt]
+    m_cited = citation_mask(text, mt)
     bib = _mask(mt, _intervals(manuscript))
     quote_intervals, uncertain_intervals = _quotation_intervals(text)
     quoted, uncertain = _mask(mt, quote_intervals), _mask(mt, sorted(uncertain_intervals))
@@ -291,14 +288,20 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
                "preprint_status": "unknown", "exact_matches": 0, "similar_matches": 0}
         coverage.append(row)
         started = time.monotonic()
+        remaining_sources = sum(not item.get("excluded") for _, item in ordered[number:])
+        fair_seconds = min(source_seconds, max(0, (deadline - started) / max(1, remaining_sources))) if deadline else source_seconds
+        row["allocated_source_seconds"] = fair_seconds
+        audit_deadline = None
 
         def budget():
             check()
             now = time.monotonic()
             if deadline is not None and now >= deadline:
                 raise SearchLimit("total-time-limit", "Total comparison time ended; retained evidence is partial.")
-            if now - started >= source_seconds:
-                raise SearchLimit("source-time-limit", "Per-source comparison time ended; retained evidence is partial.")
+            if audit_deadline is not None and now >= audit_deadline:
+                raise SearchLimit("audit-time-limit", "Excluded-text audit slice ended; scored search is unchanged.")
+            if now - started >= fair_seconds:
+                raise SearchLimit("source-time-limit", "Fair per-source comparison time ended; retained evidence is partial.")
 
         def done():
             if source_progress:
@@ -329,12 +332,14 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
             continue
         scored_paths: list[Path] = []
         audit_paths: list[Path] = []
+        diagnostics = {}
         st = []
         phase = "scored"
         try:
             budget()
             st = tokens(document["text"], _line_join_words([document["text"]]), budget)
             sw = [t[0] for t in st]
+            s_cited = citation_mask(document["text"], st)
             row["source_content_sha256"] = hashlib.sha256(document["text"].encode()).hexdigest()
             s_ok = [not b for b in _mask(st, _intervals(document))]
             if sw == mw:
@@ -350,15 +355,33 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
                     _collect(scored_paths, tuple(zip(range(a, e), range(b, f))), evidence_budget, budget)
             except ExactLimit as exc:
                 raise SearchLimit(exc.kind, exc.reason) from exc
-            for path in search(mw, sw, eligible, s_ok, budget, working_bytes=WORKING_INDEX_BYTES):
+            for path, diagnostic in anchored_paths(mw, sw, eligible, s_ok, m_cited, s_cited,
+                                                   budget, SearchLimit, working_bytes=WORKING_INDEX_BYTES):
                 _collect(scored_paths, path, evidence_budget, budget)
+                if path in scored_paths and path not in diagnostics:
+                    evidence_budget.add(2048)
+                    diagnostics[path] = diagnostic
             row["scored_search_complete"] = True
             phase = "audit"
+            # Audit work must not consume the rest of the budget for later sources.
+            audit_deadline = min(started + fair_seconds, time.monotonic() + fair_seconds * 0.1)
             if not all(eligible) or not all(s_ok):
-                for path in search(mw, sw, [True] * len(mw), [True] * len(sw), budget,
-                                   working_bytes=WORKING_INDEX_BYTES):
+                for path, diagnostic in anchored_paths(
+                        mw, sw, [True] * len(mw), [True] * len(sw), m_cited, s_cited,
+                        budget, SearchLimit, working_bytes=WORKING_INDEX_BYTES):
                     if not all(eligible[path[0][0]:path[-1][0] + 1]) or not all(s_ok[path[0][1]:path[-1][1] + 1]):
                         _collect(audit_paths, path, evidence_budget, budget)
+                        if path in audit_paths and path not in diagnostics:
+                            evidence_budget.add(2048)
+                            diagnostics[path] = diagnostic
+                try:
+                    for a, e, b, f in _exact_runs(mw, [True] * len(mw), [0] * len(mw), sw, [True] * len(sw),
+                                                [0] * len(sw), 9, budget):
+                        path = tuple(zip(range(a, e), range(b, f)))
+                        if not all(eligible[a:e]) or not all(s_ok[b:f]):
+                            _collect(audit_paths, path, evidence_budget, budget)
+                except ExactLimit as exc:
+                    raise SearchLimit(exc.kind, exc.reason) from exc
             row["audit_search_complete"] = True
         except SearchLimit as exc:
             row.update(reason=exc.reason, incomplete_stage=phase)
@@ -415,6 +438,15 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
                               "source_unmatched": info["source_span"] - len(path)},
                     "order": {"out_of_order_blocks": 0},
                 }
+                if kind == "similar":
+                    diagnostic = diagnostics[path]
+                    match["diagnostics"] = {
+                        "source": sid, "source_content_sha256": row["source_content_sha256"],
+                        "manuscript_span": [m_positions[0], m_positions[-1] + 1],
+                        "source_span": [s_positions[0], s_positions[-1] + 1],
+                        "matched_word_count": len(path), **diagnostic,
+                        "scored": not excluded,
+                    }
                 (raw if excluded else matches).append(match)
                 if not excluded:
                     (exact_words if kind == "exact" else similar_words)[sid].update(m_positions)
@@ -479,7 +511,7 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
     matches.sort(key=lambda m: (m["manuscript"]["match_start"], m["source_id"], m["source"]["match_start"], m["aligned_pairs"]))
     settings = {"minimum_matched_words": 9, "exclude_bibliography": True, "exclude_quotes": exclude_quotes,
                 "score_basis": SCORE_BASIS, "score_policy_version": SCORE_POLICY_VERSION,
-                "manuscript_scope": scope, "improved_eng_config": asdict(cfg),
+                "manuscript_scope": scope, "improved_eng_config": {**asdict(cfg), **PROFILE},
                 "normalization_version": NORMALIZATION_VERSION, "source_time_limit_seconds": source_seconds,
                 "total_time_limit_seconds": total_time_limit_seconds, "working_index_limit_mib": 128}
     return {
@@ -492,15 +524,18 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
         "classification": {"engine_candidate": VERSION, "normalization_version": NORMALIZATION_VERSION,
                            "metrics": metrics, "coverage_intervals": intervals,
                            "labels": {"similar": "Ordered equal wording with gaps; no reordering or semantic matching."}},
-        "improved_eng": {"config": asdict(cfg), "raw_excluded_evidence": raw,
+        "improved_eng": {"config": {**asdict(cfg), **PROFILE}, "raw_excluded_evidence": raw,
+                         "manuscript_ledger_sha256": ledger_sha256(mt),
+                         "similar_diagnostics": [m["diagnostics"] for m in matches + raw if m["match_kind"] == "similar"],
+                         "calibration_ready": bool(coverage) and denominator > 0 and all(r["status"] == "compared" for r in coverage),
                          "audit_complete": bool(coverage) and all(
                              r["audit_search_complete"] or r["status"] in {"excluded-by-user", "excluded-identical"}
                              for r in coverage),
-                         "search": "Seeded saturated ordered equal-pair paths; all maximal valid subwindows; explicit resource limits."},
+                         "search": "Strong content-word anchor; limited bidirectional extension; local/cumulative continuity; explicit limits."},
         "methodology": {
             "name": MODEL_ID, "version": VERSION, "normalization": NORMALIZATION_VERSION,
             "exact": "Contiguous equal normalized word units, at least nine.",
-            "similar": "At least nine ordered equal pairs, a three-word seed, gap at most five per side, density at least 0.60 per side.",
+            "similar": "Four contiguous matching content words anchor at least nine qualifying equal pairs; local 70% density over12 prose tokens; maximum gap2, cumulative gap6 per side, at most3 gap events. Citation tokens cannot qualify.",
             "denominator": DENOMINATOR_DESCRIPTION,
             "limitations": "Lexical hypotheses, not vendor parameters. No seed means no candidate. Literal numbers; no citation removal. Resource-limited search is explicitly partial.",
         },

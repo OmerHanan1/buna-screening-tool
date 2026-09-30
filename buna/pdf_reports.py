@@ -13,6 +13,7 @@ import sys
 import threading
 import unicodedata
 from collections import Counter, defaultdict
+from difflib import SequenceMatcher
 from pathlib import Path
 from uuid import uuid4
 
@@ -21,7 +22,7 @@ import pymupdf as fitz
 from buna.result_state import result_state
 from buna.reports import _THEME
 
-PDF_RENDERER_VERSION = "7"
+PDF_RENDERER_VERSION = "8"
 _LOCK = threading.Lock()
 def _theme(name: str) -> str:
     match = re.search(rf"--cp-{re.escape(name)}:\s*(#[0-9a-fA-F]{{6}})", _THEME)
@@ -74,16 +75,55 @@ def _glyphs(document: fitz.Document, page_indices: list[int]) -> tuple[str, list
     return "".join(text), glyphs
 
 
+class PageMapper:
+    """Cache page normalization and exact anchors; never place by fuzzy score."""
+
+    def __init__(self, saved: str, glyph_text: str):
+        self.saved = saved
+        self.source, self.positions = _normalize(saved)
+        self.rendered, self.rendered_positions = _normalize(glyph_text)
+        self.blocks = None
+        self.block_limit = False
+
+    def map(self, start: int, end: int) -> tuple[list[int], str]:
+        return _map_region(self, start, end)
+
+    def exact_blocks(self):
+        if self.blocks is None:
+            self.blocks = []
+            # Bound an atomic difflib operation. Oversized pages retain the
+            # existing direct exact mappings, never a truncated page search.
+            if max(len(self.source), len(self.rendered)) > 30000:
+                self.block_limit = True
+                return self.blocks
+            source_counts, rendered_counts = Counter(self.source), Counter(self.rendered)
+            if sum(count * rendered_counts[char] for char, count in source_counts.items()) > 4_000_000:
+                self.block_limit = True
+                return self.blocks
+            for a, b, size in SequenceMatcher(None, self.source, self.rendered, autojunk=False).get_matching_blocks():
+                if size < 24:
+                    continue
+                text = self.source[a:a + size]
+                if (self.source.find(text) == a and self.source.find(text, a + 1) == -1
+                        and self.rendered.find(text) == b and self.rendered.find(text, b + 1) == -1):
+                    self.blocks.append((a, b, size))
+        return self.blocks
+
+
 def map_region(saved: str, glyph_text: str, start: int, end: int) -> tuple[list[int], str]:
+    return PageMapper(saved, glyph_text).map(start, end)
+
+
+def _map_region(mapper: PageMapper, start: int, end: int) -> tuple[list[int], str]:
     """Accept exact normalized-page alignment or a unique exact local context.
 
     Never use fuzzy similarity to place an annotation. Ambiguity is a reported
     mapping failure, not permission to highlight a guessed occurrence.
     """
-    if not 0 <= start < end <= len(saved):
+    if not 0 <= start < end <= len(mapper.saved):
         return [], "Saved range is outside the extracted page."
-    source, positions = _normalize(saved)
-    rendered, rendered_positions = _normalize(glyph_text)
+    source, positions = mapper.source, mapper.positions
+    rendered, rendered_positions = mapper.rendered, mapper.rendered_positions
     first, last = bisect.bisect_left(positions, start), bisect.bisect_left(positions, end)
     fragment = source[first:last]
     if not fragment:
@@ -102,7 +142,15 @@ def map_region(saved: str, glyph_text: str, start: int, end: int) -> tuple[list[
     at = rendered.find(fragment)
     if len(fragment) >= 20 and at >= 0 and rendered.find(fragment, at + 1) == -1:
         return sorted(set(rendered_positions[at:at + len(fragment)])), "unique-phrase"
-    return [], "No unique exact glyph mapping; no highlight was placed."
+    # Different PDF extractors may insert a header, reorder a column, or put a
+    # footnote immediately beside a short word. An exact unique block anchors
+    # that word without requiring both fixed-size neighboring contexts to agree.
+    for a, b, size in mapper.exact_blocks():
+        if a <= first and last <= a + size:
+            begin = b + first - a
+            return sorted(set(rendered_positions[begin:begin + len(fragment)])), "unique-exact-block"
+    return [], ("Exact-block mapping work limit reached; no guessed placement." if mapper.block_limit
+                else "No unique exact glyph mapping; no highlight was placed.")
 
 
 def _regions(report: dict, text: str) -> tuple[list[dict], list[dict]]:
@@ -390,6 +438,7 @@ def generate_pdf(payload: dict, destination: Path) -> dict:
     units = [(i, page["text"], offsets[i], [i]) for i, page in enumerate(pages)] if mode == "original-pdf" else [(0, text, 0, list(range(manuscript.page_count)))]
     for logical_page, saved, offset, physical in units:
         glyph_text, glyphs = _glyphs(manuscript, physical)
+        mapper = PageMapper(saved, glyph_text)
         for glyph in glyphs:
             if glyph:
                 page_glyph_bounds[glyph["page"]].append(glyph["quad"].rect)
@@ -398,7 +447,7 @@ def generate_pdf(payload: dict, destination: Path) -> dict:
                 start, end = max(a, offset), min(b, offset + len(saved))
                 if start >= end:
                     continue
-                indices, method = map_region(saved, glyph_text, start - offset, end - offset)
+                indices, method = mapper.map(start - offset, end - offset)
                 if not indices or any(glyphs[index] is None for index in indices):
                     failures.append({"sequence": sequence_index + 1, "manuscript_page": logical_page + 1, "start": start, "end": end,
                                      "sources": sorted(sequence["sources"]), "reason": method if not indices else "Matched glyph coordinates unavailable; no guessed placement."})
@@ -467,9 +516,11 @@ def generate_pdf(payload: dict, destination: Path) -> dict:
         body += (f"<p><b>E · Exact overlap</b>: {int(counts.get('exact_words', 0))} words · "
                  f"<b>S · Similar wording</b> only: {int(counts.get('similar_only_words', 0))} words · "
                  f"Combined: {int(counts.get('combined_words', 0))} unique words.</p>")
-        similar_description = ("ordered shared wording, at least nine equal words, gap at most five and density at least 60% per side"
-                               if report.get("comparison_model") == "improvedEng"
-                               else "shared wording with bounded edits or reordering")
+        similar_description = (
+            "strong content-word anchor with limited extension, at least nine qualifying words and local continuity; citations do not qualify"
+            if report.get("algorithm_version") == "improvedEng-v2" else
+            "ordered shared wording, at least nine equal words, gap at most five and density at least 60% per side"
+            if report.get("comparison_model") == "improvedEng" else "shared wording with bounded edits or reordering")
         body += f"<p class='muted'>Exact: contiguous equal normalized words. Similar: {similar_description}. Exact takes visual precedence; comments retain source alternatives. E/S marks remain usable in grayscale.</p>"
     body += _summary_table(report, numbers, names)
     basis = {"all-submitted-word-units": "total submitted word units",

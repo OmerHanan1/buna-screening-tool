@@ -180,3 +180,31 @@ def test_comparison_model_is_explicit_and_standard_by_default(tmp_path):
                     break
                 time.sleep(.01)
         assert models == ["validated-lexical", "classified-v1.1", "improvedEng"]
+
+
+def test_similar_diagnostics_csv_uses_same_ownership_and_saved_evidence(tmp_path):
+    root, paper = corpus(tmp_path)
+
+    def diagnostic_worker(folder, uid):
+        worker(folder, uid)
+        (folder / "report.json").write_text(json.dumps({"improved_eng": {
+            "similar_diagnostics": [{"source": "1", "anchor_length": 4, "matched_word_count": 10,
+                                    "reason_match_terminated": ["local-density"]}]}}))
+
+    with TestClient(create_public_app(root, tmp_path, worker_runner=diagnostic_worker)) as client:
+        owner = {"Authorization": "Bearer " + client.post("/api/public/session").json()["token"]}
+        other = {"Authorization": "Bearer " + client.post("/api/public/session").json()["token"]}
+        response = client.post("/api/public/jobs", headers=owner,
+                               data={"selected": json.dumps([paper["sha256"]]), "comparison_model": "improvedEng"},
+                               files={"target": ("original.txt", b"Original synthetic manuscript.")})
+        assert response.status_code == 202
+        path = "/api/public/jobs/" + response.json()["id"]
+        for _ in range(100):
+            if client.get(path, headers=owner).json()["status"] == "complete":
+                break
+            time.sleep(.01)
+        csv = client.get(path + "/report.csv", headers=owner)
+        assert csv.status_code == 200 and csv.headers["content-type"].startswith("text/csv")
+        assert "anchor_length" in csv.text and "local-density" in csv.text
+        assert client.get(path + "/report.csv", headers=other).status_code == 404
+        assert client.get(path + "/report.csv").status_code == 401

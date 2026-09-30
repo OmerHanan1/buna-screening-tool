@@ -239,12 +239,18 @@ def main():
         summary["classification_counts"] = {key: report["classification"]["metrics"][key] for key in
             ("exact_words", "similar_only_words", "unmatched_words", "not_fully_checked_words")}
     progress("write-evidence")
+    if report.get("comparison_model") == "improvedEng":
+        from buna.match_diagnostics import diagnostics_csv
+        report["improved_eng"]["similar_diagnostics_csv"] = diagnostics_csv(report)
+        Path("similar-diagnostics.csv").write_text(report["improved_eng"]["similar_diagnostics_csv"], encoding="utf-8")
     Path("report.json").write_text(json.dumps(report, ensure_ascii=False))
     atomic_json(Path("comparison-complete.json"), summary)
     progress("render-pdf")
-    generate_pdf({"job": {"filename": request["title"], "document": target,
+    mapping = generate_pdf({"job": {"filename": request["title"], "document": target,
                           "manuscript_sha256": hashlib.sha256(Path(request["target"]).read_bytes()).hexdigest()},
                   "report": report, "original": request["target"]}, Path("report.pdf"))
+    report["pdf_mapping"] = mapping
+    atomic_json(Path("report.json"), report)
     if request["attributions"]:
         progress("attribution")
         body = "<h1>Public source attribution</h1>"

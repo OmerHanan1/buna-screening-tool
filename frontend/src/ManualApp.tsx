@@ -212,7 +212,7 @@ export default function ManualApp() {
             <option value="improvedEng">improvedEng · ordered lexical matching (experimental)</option>
           </select></label>
           {comparisonModel !== "validated-lexical" && <p className="app-error">Experimental: increased recall has not established precision. This is not a validated vendor-equivalent model.</p>}
-          {comparisonModel === "improvedEng" && <p>Three-word exact seeds; at least nine ordered equal words; gap at most five and density at least 60% per side. Excluded text cannot connect scored passages. Resource-limited searches are explicitly partial.</p>}
+          {comparisonModel === "improvedEng" && <p>Exact matching unchanged. Similar: four-content-word exact anchor, at least nine qualifying matches, 70% local agreement and cumulative gap limits. Citations cannot qualify a Similar match. Excluded text cannot connect passages; partial coverage cannot calibrate recall.</p>}
           <p className="muted">Algorithm {engineVersion || "unavailable"} · Nine-word configured minimum · Eligible manuscript words after exclusions.
             Manuscript limits: 20 MiB, 250 pages, 1 million extracted characters. Comparison sources: 32 MiB, 600 pages, 2 million characters. Matching remains bounded to 120 seconds/source and 64 MiB estimated retained evidence; large sources may be partially checked.
             Scanned PDFs need OCR before upload.</p>
