@@ -312,8 +312,13 @@ class Engine:
                 update(papers=papers, progress=30 + round(35 * (index + 1) / max(1, len(papers))))
             check()
             update(stage="comparison", progress=70, message="Comparing local full text and aggregating unique manuscript spans.")
+            model = job.get("comparison_settings", {}).get("comparison_model", "validated-lexical")
+            algorithm = ALGORITHM_VERSION
+            if model == "improvedEng":
+                from buna.improved_eng import VERSION as IMPROVED_VERSION
+                algorithm = IMPROVED_VERSION
             checkpoint_key = consent_digest({
-                "algorithm": ALGORITHM_VERSION, "score_policy": "eligible-manuscript-v1", "manuscript": job.get("manuscript_sha256"),
+                "algorithm": algorithm, "score_policy": "eligible-manuscript-v1", "manuscript": job.get("manuscript_sha256"),
                 "source_capacity_profile": "source-v1", "source_character_limit": SOURCE_MAX_CHARACTERS,
                 "settings": job.get("comparison_settings", {}),
                 "sources": [(p["id"], p.get("sha256"), p.get("excluded"), p.get("doi")) for p in papers],
@@ -345,13 +350,23 @@ class Engine:
                 update(papers=papers, progress=70 + round(24 * completed_sources / max(len(sources), 1)),
                        message=f"Processed {completed_sources} of {len(sources)} source papers.")
 
-            report = compare_documents(
-                manuscript, sources, cancelled=event.is_set,
-                **({"exclude_quotes": job.get("comparison_settings", {}).get("exclude_quotes", True), "progress": emit,
-                    "match_policy": DEFAULT_POLICY if job.get("comparison_settings", {}).get("comparison_model") == "experimental-ordered" else None,
-                    "load_document": load_document, "source_done": source_done, "load_checkpoint": load_checkpoint}
-                   if job.get("workflow") == "manual" else {}),
-            )
+            if model == "improvedEng":
+                from buna.improved_eng import improved_report
+                report = improved_report(
+                    manuscript, sources, cancelled=event.is_set, progress=emit,
+                    exclude_quotes=job.get("comparison_settings", {}).get("exclude_quotes", True),
+                    load_document=load_document if job.get("workflow") == "manual" else None,
+                    source_progress=lambda row: source_done(row, []),
+                    total_time_limit_seconds=480,
+                )
+            else:
+                report = compare_documents(
+                    manuscript, sources, cancelled=event.is_set,
+                    **({"exclude_quotes": job.get("comparison_settings", {}).get("exclude_quotes", True), "progress": emit,
+                        "match_policy": DEFAULT_POLICY if model == "experimental-ordered" else None,
+                        "load_document": load_document, "source_done": source_done, "load_checkpoint": load_checkpoint}
+                       if job.get("workflow") == "manual" else {}),
+                )
             check()
             excluded_ids = set(report.get("excluded_source_ids", []))
             comparison_coverage = {row["source_id"]: row for row in report.get("source_coverage", [])}

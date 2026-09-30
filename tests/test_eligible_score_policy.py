@@ -2,6 +2,7 @@ import copy
 import pytest
 
 from buna.classified import classify_report
+from buna.improved_eng import improved_report
 from buna.comparison import compare_documents, _tokens
 from buna.documents import _structure
 from buna.result_state import result_state
@@ -24,7 +25,7 @@ def counted_fixture():
     return target
 
 
-@pytest.mark.parametrize("engine", [compare_documents, classify_report])
+@pytest.mark.parametrize("engine", [compare_documents, classify_report, improved_report])
 @pytest.mark.parametrize("exclude_quotes,expected", [(True, 140), (False, 150)])
 def test_shared_eligible_denominator_and_duplicate_source_union(engine, exclude_quotes, expected):
     target = counted_fixture()
@@ -66,7 +67,7 @@ def test_mask_union_no_double_subtraction_and_other_declared_mask():
     assert result["excluded_manuscript_words"] == 5
 
 
-@pytest.mark.parametrize("engine", [compare_documents, classify_report])
+@pytest.mark.parametrize("engine", [compare_documents, classify_report, improved_report])
 def test_all_excluded_unscorable_and_source_failures_do_not_reduce_denominator(engine):
     excluded = engine(document('"' + MATCH + '"'), [{"id": "source", "document": document(MATCH + ". independent")}])
     assert excluded["metrics"]["score_denominator_words"] == 0
@@ -82,7 +83,7 @@ def test_all_excluded_unscorable_and_source_failures_do_not_reduce_denominator(e
     assert result_state(result)["state"] == "partial"
 
 
-@pytest.mark.parametrize("engine", [compare_documents, classify_report])
+@pytest.mark.parametrize("engine", [compare_documents, classify_report, improved_report])
 def test_no_abstract_fallback_and_minimum_match_filter_keep_unmatched_words(engine):
     target = document(" ".join(f"uniqueword{i}" for i in range(50)) + '\n\n"one two three four five"\n\nReferences\nreferenceword')
     result = engine(target, [{"id": "short", "document": document("uniqueword0 uniqueword1 uniqueword2 uniqueword3 end")}])

@@ -59,6 +59,13 @@ is not the only cue. The standard model remains the default. Scores and
 normalization can differ, and no superiority or vendor-equivalence claim is made.
 See [the model and limitations](docs/experimental-wording.md).
 
+A third optional **Advanced > improvedEng** model searches ordered lexical
+passages from exact three-word seeds: at least nine equal words, gap at most five
+and density at least 60% on each side. It retains the same eligible-word scoring
+policy and leaves both existing engines unchanged. It is experimental, may
+report partial coverage on difficult inputs, and makes no Crossref-equivalence
+claim. See [improvedEng rules, audit evidence and limitations](docs/improved-eng.md).
+
 ## Code and deployment
 
 * `buna/public_app.py`: isolated anonymous public API; it never serves the local store.

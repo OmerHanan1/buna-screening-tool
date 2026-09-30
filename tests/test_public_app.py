@@ -164,7 +164,7 @@ def test_comparison_model_is_explicit_and_standard_by_default(tmp_path):
         worker(folder, uid)
     with TestClient(create_public_app(root, tmp_path, worker_runner=record_worker)) as client:
         owner = {"Authorization": "Bearer " + client.post("/api/public/session").json()["token"]}
-        for model in [None, "classified-v1.1", "unknown-model"]:
+        for model in [None, "classified-v1.1", "unknown-model", "improvedEng"]:
             fields = {"selected": json.dumps([paper["sha256"]])}
             if model is not None:
                 fields["comparison_model"] = model
@@ -179,4 +179,4 @@ def test_comparison_model_is_explicit_and_standard_by_default(tmp_path):
                 if client.get(path, headers=owner).json()["status"] != "running":
                     break
                 time.sleep(.01)
-        assert models == ["validated-lexical", "classified-v1.1"]
+        assert models == ["validated-lexical", "classified-v1.1", "improvedEng"]

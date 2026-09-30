@@ -45,7 +45,7 @@ class RunJob(ProviderChoice):
     mode: Literal["offline", "online"] = "offline"
     consent_token: str | None = None
     exclude_quotes: bool = True
-    comparison_model: Literal["validated-lexical", "experimental-ordered"] = "validated-lexical"
+    comparison_model: Literal["validated-lexical", "experimental-ordered", "improvedEng"] = "validated-lexical"
 
 
 class SourceSelection(BaseModel):

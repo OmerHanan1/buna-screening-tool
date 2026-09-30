@@ -148,6 +148,7 @@ body{background:var(--cp-bg);color:var(--cp-text);font:15px/1.6 "Segoe UI",Aptos
         f'<p>{_escape(report.get("scope", "Only the sources listed in this report."))}</p>'
         + (f'<p><strong>{_escape(scope_notice)}</strong></p>' if scope_notice else '')
         + ('<p><strong>Experimental ordered-instance model: accuracy and vendor equivalence are not established.</strong></p>' if report.get("comparison_model") == "experimental-ordered" else '')
+        + ('<p><strong>improvedEng: experimental ordered lexical matching, not semantic matching or verified Crossref equivalence. Excluded-text audit evidence is separate in JSON.</strong></p>' if report.get("comparison_model") == "improvedEng" else '')
         +
         '<p>Page-preserving extracted text, not the original PDF layout. Superscript numbers refer to source files in the legend.</p>'
         '<div class="no-print"><button onclick="window.print()">Print annotated manuscript</button> '

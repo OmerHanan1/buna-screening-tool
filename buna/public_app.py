@@ -554,7 +554,7 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
                 if keep_indices and (shared is None or str(form.get("share_authorized", "")) != "true"):
                     raise HTTPException(422, "Shared saving requires explicit hosted/shared-use authorization and available storage.")
                 model = str(form.get("comparison_model", "validated-lexical"))
-                if model not in {"validated-lexical", "classified-v1.1"}:
+                if model not in {"validated-lexical", "classified-v1.1", "improvedEng"}:
                     raise HTTPException(422, "Select a supported comparison model.")
                 if (not isinstance(selected, list) or not all(isinstance(i, str) and re.fullmatch(r"[0-9a-f]{64}", i) for i in selected)
                         or len(selected) != len(set(selected))):

@@ -135,6 +135,7 @@ export default function Reader({ report, jobId, engineVersion, standalone = fals
     {result.state !== "complete" && <div className="reader-notice" role="status"><strong>{result.heading}</strong>
       <span>{result.explanation}</span><small>{result.partial_sources} partly checked · {result.unchecked_sources} unavailable · {result.excluded_sources} excluded</small></div>}
     {report.comparison_model === "experimental-ordered" && <div className="reader-notice">Experimental model: precision and proprietary equivalence are not established.</div>}
+    {report.comparison_model === "improvedEng" && <div className="reader-notice">improvedEng: experimental ordered lexical matching. No semantic matching or verified Crossref equivalence.</div>}
     <details className="reader-details"><summary>Report details</summary>
       <div className="reader-detail-grid"><p>Saved algorithm: {report.algorithm_version || "Legacy"}{engineVersion ? ` · Running engine: ${engineVersion}` : ""}<br />
         Generated: {report.generated_at ? new Date(report.generated_at).toLocaleString() : "Not recorded"}</p>

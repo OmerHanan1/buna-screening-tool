@@ -17,7 +17,7 @@ export default function ManualApp() {
   const [saved, setSaved] = useState<LocalJob[]>([]);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [excludeQuotes, setExcludeQuotes] = useState(true);
-  const [experimental, setExperimental] = useState(false);
+  const [comparisonModel, setComparisonModel] = useState("validated-lexical");
   const [engineVersion, setEngineVersion] = useState("");
   const [libraryEnabled, setLibraryEnabled] = useState(false);
   const [libraryOpen, setLibraryOpen] = useState(false);
@@ -83,7 +83,7 @@ export default function ManualApp() {
   }
   function reset() {
     setJob(null); setReport(null); setError(""); setHistoryOpen(false); setEditSource("");
-    setExcludeQuotes(true); setExperimental(false); setShowFiles(8);
+    setExcludeQuotes(true); setComparisonModel("validated-lexical"); setShowFiles(8);
     setCollectionNotice(""); setCollectionPapers([]); setCollectionId(""); setNewComparison(value => value + 1);
   }
   async function uploadTarget(file: File) {
@@ -192,7 +192,7 @@ export default function ManualApp() {
         <div className="setup-action"><p>{libraryEnabled ? "Comparison runs locally using your uploaded and selected library papers. DOI import is separate." : "Files stay on this computer. No online search or external processing."}</p>
           {!active && <button className="primary" disabled={!job || !ready || locked || job.report_available} onClick={() => void perform("Starting comparison…", async () => {
             if (job) setJob(await api<LocalJob>(`/jobs/${job.id}/run`, json("POST", {
-              mode: "offline", exclude_quotes: excludeQuotes, ...(experimental ? { comparison_model: "experimental-ordered" } : {}),
+              mode: "offline", exclude_quotes: excludeQuotes, comparison_model: comparisonModel,
             })));
           })}>Compare papers{ready ? ` · ${ready}` : ""}</button>}
         </div>
@@ -206,8 +206,13 @@ export default function ManualApp() {
         {job?.report_available && !report && <p role="status">Opening your saved report…</p>}
         <details className="setup-advanced"><summary>Advanced settings</summary>
           <label><input type="checkbox" checked={excludeQuotes} disabled={locked} onChange={event => setExcludeQuotes(event.target.checked)} /> Exclude recognized quotations from matching</label>
-          <label><input type="checkbox" checked={experimental} disabled={locked} onChange={event => setExperimental(event.target.checked)} /> Use experimental ordered-instance model</label>
-          {experimental && <p className="app-error">Experimental: increased recall has not established precision. This is not a validated vendor-equivalent model.</p>}
+          <label>Comparison model <select value={comparisonModel} disabled={locked} onChange={event => setComparisonModel(event.target.value)}>
+            <option value="validated-lexical">Standard wording comparison</option>
+            <option value="experimental-ordered">Experimental ordered-instance model</option>
+            <option value="improvedEng">improvedEng · ordered lexical matching (experimental)</option>
+          </select></label>
+          {comparisonModel !== "validated-lexical" && <p className="app-error">Experimental: increased recall has not established precision. This is not a validated vendor-equivalent model.</p>}
+          {comparisonModel === "improvedEng" && <p>Three-word exact seeds; at least nine ordered equal words; gap at most five and density at least 60% per side. Excluded text cannot connect scored passages. Resource-limited searches are explicitly partial.</p>}
           <p className="muted">Algorithm {engineVersion || "unavailable"} · Nine-word configured minimum · Eligible manuscript words after exclusions.
             Manuscript limits: 20 MiB, 250 pages, 1 million extracted characters. Comparison sources: 32 MiB, 600 pages, 2 million characters. Matching remains bounded to 120 seconds/source and 64 MiB estimated retained evidence; large sources may be partially checked.
             Scanned PDFs need OCR before upload.</p>

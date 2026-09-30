@@ -189,7 +189,12 @@ def main():
         state["checked_sources"] += int(row["status"] == "compared")
         progress("compare")
     model = request.get("comparison_model", "validated-lexical")
-    if model == "classified-v1.1":
+    if model == "improvedEng":
+        from buna.improved_eng import improved_report
+        report = improved_report(target, sources, exclude_quotes=True, load_document=load_document,
+                                 progress=comparison_progress, source_progress=lambda row: source_done(row, []),
+                                 total_time_limit_seconds=COMPARISON_SECONDS)
+    elif model == "classified-v1.1":
         from buna.classified import classify_report
         report = classify_report(target, sources, exclude_quotes=True, load_document=load_document,
                                  progress=comparison_progress, source_progress=lambda row: source_done(row, []),

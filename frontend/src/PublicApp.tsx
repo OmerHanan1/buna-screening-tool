@@ -522,13 +522,15 @@ export default function PublicApp() {
               {sharedAvailable && sources.some(file => /\.pdf$/i.test(file.name)) && <p className="hosted-shared-notice">Checking the box immediately uploads and saves that comparison PDF; no manuscript or comparison is required. Only check it if you’re authorized to store and share it for hosted comparisons and matching excerpts. Saved papers are available to everyone with app access. Wait for “Saved to shared library” before leaving; an unfinished save may be lost after a service restart.</p>}
               {sharedCapacity && <p className="hosted-shared-notice">Shared capacity: {sharedCapacity.papers_remaining} of {sharedCapacity.paper_limit} user-paper slots remaining; {sharedCapacity.daily_remaining} of {sharedCapacity.daily_limit} new papers remaining this rolling day; {fileSize(sharedCapacity.bytes_remaining)} storage remaining (originals plus parsed text). Duplicate content does not use a new-paper slot. Capacity is checked again when saving.</p>}
               {sourceError && <p role="alert" className="hosted-field-error">{sourceError}</p>}
-              <details className="hosted-model-details"><summary>{model === "classified-v1.1" ? "Advanced · experimental model selected" : "Advanced"}</summary>
+              <details className="hosted-model-details"><summary>{model !== "validated-lexical" ? "Advanced · experimental model selected" : "Advanced"}</summary>
                 <label htmlFor="comparison-model">Comparison model</label>
                 <select id="comparison-model" value={model} onChange={e => setModel(e.target.value)}>
                   <option value="validated-lexical">Standard wording comparison</option>
                   <option value="classified-v1.1">Exact + similar wording (experimental)</option>
+                  <option value="improvedEng">improvedEng · ordered lexical matching (experimental)</option>
                 </select>
                 {model === "classified-v1.1" && <p>Experimental: separates exact wording from bounded word edits/reordering. Scores can differ; no accuracy or Crossref-equivalence claim.</p>}
+                {model === "improvedEng" && <p>Experimental: exact three-word seeds, at least nine equal words, gaps up to five and at least 60% density independently on each side. Order preserved; no semantic matching. Difficult inputs may be partially checked. No verified Crossref-equivalence claim.</p>}
               </details>
             </section>
             <div className="hosted-action-bar"><p id="compare-reason">{busy ? "Uploading your files…" : disabledReason || `Ready to compare against ${comparisonCount} papers.`}</p><button className="hosted-primary" disabled={!!disabledReason || busy} aria-describedby="compare-reason" onClick={compare}>{busy ? "Uploading…" : "Compare papers"}<ArrowRight size={16} aria-hidden="true" /></button></div>
@@ -539,6 +541,7 @@ export default function PublicApp() {
           {job.status === "running" ? <div className="hosted-surface hosted-progress"><LoaderCircle size={24} className="hosted-spin" aria-hidden="true" /><h2>Comparing your manuscript</h2><p>{submitted.title} · {submitted.count} comparison papers</p><p>{stages[job.progress?.stage || ""] || "Starting the comparison"}{job.progress?.source_index && ["load-source", "compare"].includes(job.progress?.stage || "") ? ` · paper ${job.progress.source_index} of ${job.progress.source_count || submitted.count}` : ""}</p><p>{job.progress?.checked_sources !== undefined ? `${job.progress.checked_sources} papers fully checked. ` : ""}Large comparisons can take several minutes; you can cancel at any time.</p><div className="hosted-progress-meta"><Elapsed since={startedAt} /><button onClick={remove}>Cancel comparison</button></div>{error && <button onClick={() => setRetryStatus(value => value + 1)}>Retry status</button>}</div>
           : job.status === "complete" ? <>
             {job.comparison_model === "classified-v1.1" && <p className="hosted-critical">Experimental exact + similar wording report. Scores may differ from the standard model.</p>}
+            {job.comparison_model === "improvedEng" && <p className="hosted-critical">improvedEng experimental ordered lexical report. Scores may differ from the standard model; no verified Crossref equivalence.</p>}
             {job.partial && <p className="hosted-critical">{job.score_available === false ? "Comparison incomplete. No score is available." : "Partial comparison: the overlap is a lower bound."} {job.checked} of {job.total} papers were fully checked.</p>}
             {fallbackWarning && <p className="hosted-critical">{fallbackWarning}</p>}
             <div className="hosted-surface">

@@ -346,7 +346,7 @@ def generate_pdf(payload: dict, destination: Path) -> dict:
     report, job = payload["report"], payload["job"]
     pages = report.get("manuscript_pages") or job["document"]["pages"]
     text = "\n\n".join(page["text"] for page in pages)
-    classified = (report.get("comparison_model") == "classified-v1.1"
+    classified = (report.get("comparison_model") in {"classified-v1.1", "improvedEng"}
                   and isinstance(report.get("classification"), dict)
                   and all(match.get("match_kind") in {"exact", "similar"} for match in report.get("matches", [])
                           if not match.get("excluded_from_score")))
@@ -467,7 +467,10 @@ def generate_pdf(payload: dict, destination: Path) -> dict:
         body += (f"<p><b>E · Exact overlap</b>: {int(counts.get('exact_words', 0))} words · "
                  f"<b>S · Similar wording</b> only: {int(counts.get('similar_only_words', 0))} words · "
                  f"Combined: {int(counts.get('combined_words', 0))} unique words.</p>")
-        body += "<p class='muted'>Exact: contiguous equal normalized words. Similar: shared wording with bounded edits or reordering. Exact takes visual precedence; comments retain source alternatives. E/S marks remain usable in grayscale.</p>"
+        similar_description = ("ordered shared wording, at least nine equal words, gap at most five and density at least 60% per side"
+                               if report.get("comparison_model") == "improvedEng"
+                               else "shared wording with bounded edits or reordering")
+        body += f"<p class='muted'>Exact: contiguous equal normalized words. Similar: {similar_description}. Exact takes visual precedence; comments retain source alternatives. E/S marks remain usable in grayscale.</p>"
     body += _summary_table(report, numbers, names)
     basis = {"all-submitted-word-units": "total submitted word units",
              "abstract-onward-word-units": "words from the Abstract onward",
@@ -491,7 +494,9 @@ def generate_pdf(payload: dict, destination: Path) -> dict:
         body += "<p class='warn'>Partial comparison: overlap is a lower bound; not all source passages were checked.</p>"
     if report.get("comparison_model") == "experimental-ordered":
         body += "<p class='warn'>Experimental comparison model: accuracy and vendor equivalence are not established.</p>"
-    if report.get("comparison_model") == "classified-v1.1" and not classified:
+    if report.get("comparison_model") == "improvedEng":
+        body += "<p class='warn'>improvedEng: experimental ordered lexical matching; no semantic matching or verified Crossref equivalence. Excluded-text audit evidence is separate in JSON.</p>"
+    if report.get("comparison_model") in {"classified-v1.1", "improvedEng"} and not classified:
         body += "<p class='warn'>Exact/similar classification data is unavailable in this saved report. Existing evidence is shown without inferred match-type labels.</p>"
     if classified:
         counts = (report.get("classification") or {}).get("metrics") or {}

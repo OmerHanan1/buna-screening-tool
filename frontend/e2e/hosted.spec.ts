@@ -412,7 +412,8 @@ test("expired sessions and partial/no-score results stay explicit", async ({ pag
   await expect(page.getByRole("heading", { name: "Comparison report", exact: true })).toHaveCount(0);
 });
 
-test("experimental model requires explicit selection and resets for a new comparison", async ({ page }) => {
+for (const model of ["classified-v1.1", "improvedEng"]) {
+test(`${model} requires explicit selection and resets for a new comparison`, async ({ page }) => {
   let postedModel = "";
   await page.route(site + "**", async route => {
     const name = new URL(route.request().url()).pathname.replace(new URL(site).pathname, "") || "index.html";
@@ -424,7 +425,7 @@ test("experimental model requires explicit selection and resets for a new compar
     if (url.pathname.endsWith("/session")) return route.fulfill({ json: { token: "synthetic-model-capability" } });
     if (url.pathname.endsWith("/library")) return route.fulfill({ json: { papers } });
     if (route.request().method() === "POST") {
-      postedModel = route.request().postData()?.includes("classified-v1.1") ? "classified-v1.1" : "validated-lexical";
+      postedModel = route.request().postData()?.includes(model) ? model : "validated-lexical";
       return route.fulfill({ status: 202, json: { id: "model-fixture", status: "running" } });
     }
     if (url.pathname.endsWith(".pdf")) return route.fulfill({ contentType: "application/pdf", body: "%PDF-1.7\nSynthetic model fixture" });
@@ -440,13 +441,15 @@ test("experimental model requires explicit selection and resets for a new compar
   await expect(page.getByRole("heading", { name: "44 papers selected" })).toBeVisible();
   await page.getByText("Advanced", { exact: true }).click();
   await expect(page.getByLabel("Comparison model")).toHaveValue("validated-lexical");
-  await page.getByLabel("Comparison model").selectOption("classified-v1.1");
-  await expect(page.getByText(/Experimental: separates exact wording/)).toBeVisible();
+  await page.getByLabel("Comparison model").selectOption(model);
+  await expect(page.getByText(model === "improvedEng" ? /Experimental: exact three-word seeds/ : /Experimental: separates exact wording/)).toBeVisible();
   await page.getByLabel("Your paper", { exact: true }).setInputFiles({ name: "synthetic.txt", mimeType: "text/plain", buffer: Buffer.from("Original synthetic target text.") });
   await page.getByRole("checkbox", { name: /authorized to upload/ }).check();
   await page.getByRole("button", { name: "Compare papers", exact: true }).click();
-  await expect(page.getByText("Experimental exact + similar wording report. Scores may differ from the standard model.", { exact: true })).toBeVisible();
-  expect(postedModel).toBe("classified-v1.1");
+  await expect(page.getByText(model === "improvedEng"
+    ? "improvedEng experimental ordered lexical report. Scores may differ from the standard model; no verified Crossref equivalence."
+    : "Experimental exact + similar wording report. Scores may differ from the standard model.", { exact: true })).toBeVisible();
+  expect(postedModel).toBe(model);
   await page.getByText("Report details and evidence", { exact: true }).click();
   await expect(page.getByText(/9 exact words · 6 similar-only words/)).toBeVisible();
   page.on("dialog", dialog => dialog.accept());
@@ -454,6 +457,7 @@ test("experimental model requires explicit selection and resets for a new compar
   await page.getByText("Advanced", { exact: true }).click();
   await expect(page.getByLabel("Comparison model")).toHaveValue("validated-lexical");
 });
+}
 
 test("checkbox saves without a manuscript or comparison and refreshed selections do not double count", async ({ page }) => {
   let saved = false;
