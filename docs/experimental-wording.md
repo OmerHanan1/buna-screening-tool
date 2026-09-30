@@ -31,17 +31,15 @@ those exact words. Source alternatives remain in the evidence. The candidate has
 a separately recorded numeric/Unicode normalization version, so its denominator
 and score can differ from the standard model.
 
-New standard comparisons use score policy `eligible-manuscript-v1`: the
+New standard and classified comparisons use score policy `eligible-manuscript-v1`: the
 denominator is the unique manuscript word positions remaining after the recognized
 Abstract scope, bibliography and enabled quotation exclusions. Exclusion masks
 overlap without double subtraction. Unmatched eligible words remain counted;
 excluded/unavailable sources and rejected short matches do not reduce it.
-The experimental model currently retains its prior scoped-total denominator,
-including bibliography/quotation words. Its reports label that saved basis;
-do not assume its percentages use the standard model's new denominator.
-Tokenizers and matching rules have not changed, and old saved reports retain
-their original denominators. The standard change is a user-selected policy,
-not established Crossref arithmetic.
+Overall, per-source, exact and similar-only percentages share that denominator.
+Zero eligible words is unscorable, not a zero-overlap claim. Tokenizers and
+matching rules have not changed, and old saved reports retain their original
+denominators. This is a user-selected policy, not established Crossref arithmetic.
 
 ## PDF presentation
 

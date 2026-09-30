@@ -624,8 +624,11 @@ def _classify(manuscript: dict, sources: list[dict], *, config: dict | None = No
     for item in intervals:
         item.pop("key")
     counts = Counter(state(i) for i in range(len(mt)))
-    analyzed = len(mt) - counts["excluded-front-matter"]
-    pct = lambda n: round(100 * n / analyzed, 2) if analyzed else 0.0
+    from buna.score_policy import manuscript_word_accounting
+    eligible = [included and not (exclude_quotes and quote) for included, quote in zip(in_scope, quoted)]
+    accounting = manuscript_word_accounting(eligible, front, bib, quoted, exclude_quotes=exclude_quotes)
+    denominator = accounting["score_denominator_words"]
+    pct = lambda n: round(100 * n / denominator, 2) if denominator else None
     per_source = {sid: len(exact_words.get(sid, set()) | similar_words.get(sid, set())) for sid in
                   {r["source_id"] for r in coverage}}
     for row in coverage:
@@ -633,12 +636,15 @@ def _classify(manuscript: dict, sources: list[dict], *, config: dict | None = No
             row["overlapping_words"] = per_source.get(row["source_id"], 0)
             row["exact_words"] = len(exact_words.get(row["source_id"], ()))
             row["similar_only_words"] = len(similar_words.get(row["source_id"], set()) - exact_words.get(row["source_id"], set()))
+            row.update(score_denominator_words=denominator, eligible_words=denominator,
+                       exact_percent=pct(row["exact_words"]), similar_only_percent=pct(row["similar_only_words"]),
+                       overlap_percent=pct(row["overlapping_words"]))
     return {
         "engine_candidate": VERSION, "normalization_version": NORMALIZATION_VERSION,
         "config": cfg, "exclude_quotes": exclude_quotes, "manuscript_scope": scope,
         "total_time_limit_seconds": total_time_limit_seconds,
         "warnings": warnings,
-        "metrics": {"total_words": len(mt), "analyzed_words": analyzed,
+        "metrics": {**accounting,
                     "exact_words": len(all_exact), "similar_only_words": len(all_similar),
                     "combined_words": len(all_exact) + len(all_similar),
                     "exact_percent": pct(len(all_exact)), "similar_only_percent": pct(len(all_similar)),
@@ -664,7 +670,7 @@ def classify_report(manuscript: dict, sources: list[dict], **kwargs) -> dict:
 
     Existing consumers read matches/metrics/source_coverage/manuscript_pages unchanged;
     ``kind`` keeps legacy values (exact / near-verbatim) while ``match_kind`` is authoritative.
-    Legacy score fields use the combined exact+similar word union on the scoped denominator.
+    Legacy score fields use the combined exact+similar word union on the eligible denominator.
     """
     result = _classify(manuscript, sources, **kwargs)
     mt = result.pop("_tokens")
@@ -693,39 +699,45 @@ def classify_report(manuscript: dict, sources: list[dict], **kwargs) -> dict:
         matches.append(legacy)
         evidence.append((legacy, positions))
     covered = {p for m in matches for p in m["scored_word_positions"]}
-    denominator = metrics["analyzed_words"]
-    eligible = denominator - metrics["excluded_words"]["bibliography"] - metrics["excluded_words"]["quotation"]
-    basis = ("abstract-onward-word-units" if result["manuscript_scope"]["applied"] == "abstract-onward"
-             else "all-submitted-word-units")
+    from buna.score_policy import SCORE_BASIS, SCORE_POLICY_VERSION, DENOMINATOR_DESCRIPTION
+    denominator = eligible = metrics["score_denominator_words"]
+    basis = SCORE_BASIS
     for row in result["source_coverage"]:
         if "overlapping_words" in row:
             row.update(eligible_words=eligible, score_denominator_words=denominator,
-                       overlap_percent=round(100 * row["overlapping_words"] / denominator, 2) if denominator else 0.0)
+                       overlap_percent=round(100 * row["overlapping_words"] / denominator, 2) if denominator else None)
     warnings = result["warnings"] + [
         "Experimental exact/similar wording model. Accuracy and Crossref equivalence are not established; scores may differ from the standard model.",
         "Exact means contiguous equal normalized word units. Similar means shared wording with bounded edits or block reordering, not semantic paraphrase detection.",
     ]
     if not metrics["all_sources_fully_checked"]:
         warnings.append("Not all sources were fully checked. Unmarked text is not fully checked, not a finding of originality.")
+    if not denominator:
+        warnings.append("No eligible manuscript words remain after exclusions. The comparison is unscorable; no similarity percentage is available.")
     return {
         "algorithm_version": VERSION, "comparison_model": VERSION,
         "quality_notice": "Candidate engine: exact and similar wording are classified separately; not vendor-equivalent.",
         "settings": {"minimum_matched_words": result["config"]["min_exact_words"], "exclude_bibliography": True,
                      "exclude_quotes": result["exclude_quotes"], "score_basis": basis,
+                     "score_policy_version": SCORE_POLICY_VERSION,
                      "manuscript_scope": result["manuscript_scope"], "classification_config": result["config"],
                      "total_time_limit_seconds": result["total_time_limit_seconds"],
                      "normalization_version": NORMALIZATION_VERSION, "working_index_limit_mib": 128,
                      "source_time_limit_seconds": kwargs.get("source_seconds", MAX_SOURCE_SECONDS)},
         "metrics": {"total_words": metrics["total_words"], "eligible_words": eligible,
-                    "score_denominator_words": denominator, "analyzed_words": denominator,
+                    "score_denominator_words": denominator, "analyzed_words": metrics["analyzed_words"],
+                    "scoped_words": metrics["scoped_words"],
                     "front_matter_words": metrics["excluded_words"]["front_matter"],
-                    "score_basis": basis, "score_policy_version": VERSION,
+                    "score_basis": basis, "score_policy_version": SCORE_POLICY_VERSION,
+                    "excluded_manuscript_words": metrics["excluded_manuscript_words"],
+                    "excluded_bibliography_words": metrics["excluded_bibliography_words"],
+                    "other_excluded_manuscript_words": metrics["other_excluded_manuscript_words"],
                     "overlapping_words": len(covered),
-                    "overlap_percent": round(100 * len(covered) / denominator, 2) if denominator else 0.0,
-                    "bibliography_words": metrics["excluded_words"]["bibliography"],
+                    "overlap_percent": round(100 * len(covered) / denominator, 2) if denominator else None,
+                    "bibliography_words": metrics["bibliography_words"],
                     "quotation_words": metrics["quotation_words"],
                     "excluded_quotation_words": metrics["excluded_words"]["quotation"],
-                    "unscorable": denominator == 0, "all_text_excluded": eligible == 0 and denominator > 0,
+                    "unscorable": denominator == 0, "all_text_excluded": eligible == 0,
                     "sources_supplied": len(sources),
                     "sources_compared": sum(r["status"] in ("compared", "compared-with-limits") for r in result["source_coverage"]),
                     "identical_sources_excluded": sum(r["status"] == "excluded-identical" for r in result["source_coverage"]),
@@ -738,7 +750,7 @@ def classify_report(manuscript: dict, sources: list[dict], **kwargs) -> dict:
             "version": VERSION, "normalization": NORMALIZATION_VERSION,
             "exact": "Maximal contiguous equal normalized word runs, at least nine words under the default configuration.",
             "similar": "Best local equal-word block alignment per manuscript sentence/source under the declared edit/order limits; not semantic paraphrase detection.",
-            "denominator": "The saved manuscript scope's normalized word units; exclusions affect the numerator. This differs from proprietary tokenizers.",
+            "denominator": DENOMINATOR_DESCRIPTION,
             "unmatched": "No match found by this model in fully checked sources, never proof of originality.",
             "limitations": "Similar retrieval is lexical and sentence-bounded. Only the best similar alignment per source and manuscript sentence is retained; distinct exact locations are retained.",
             "integration_corrections": "Version1.1 adds lazy loading, size/index/atomic-work guards, source exclusion boundaries, complete numeric units and warning/coverage fixes. Earlier benchmark results do not establish this revision's accuracy.",

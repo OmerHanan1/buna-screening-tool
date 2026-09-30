@@ -24,7 +24,7 @@ def counted_fixture():
     return target
 
 
-@pytest.mark.parametrize("engine", [compare_documents])
+@pytest.mark.parametrize("engine", [compare_documents, classify_report])
 @pytest.mark.parametrize("exclude_quotes,expected", [(True, 140), (False, 150)])
 def test_shared_eligible_denominator_and_duplicate_source_union(engine, exclude_quotes, expected):
     target = counted_fixture()
@@ -66,7 +66,7 @@ def test_mask_union_no_double_subtraction_and_other_declared_mask():
     assert result["excluded_manuscript_words"] == 5
 
 
-@pytest.mark.parametrize("engine", [compare_documents])
+@pytest.mark.parametrize("engine", [compare_documents, classify_report])
 def test_all_excluded_unscorable_and_source_failures_do_not_reduce_denominator(engine):
     excluded = engine(document('"' + MATCH + '"'), [{"id": "source", "document": document(MATCH + ". independent")}])
     assert excluded["metrics"]["score_denominator_words"] == 0
@@ -82,7 +82,7 @@ def test_all_excluded_unscorable_and_source_failures_do_not_reduce_denominator(e
     assert result_state(result)["state"] == "partial"
 
 
-@pytest.mark.parametrize("engine", [compare_documents])
+@pytest.mark.parametrize("engine", [compare_documents, classify_report])
 def test_no_abstract_fallback_and_minimum_match_filter_keep_unmatched_words(engine):
     target = document(" ".join(f"uniqueword{i}" for i in range(50)) + '\n\n"one two three four five"\n\nReferences\nreferenceword')
     result = engine(target, [{"id": "short", "document": document("uniqueword0 uniqueword1 uniqueword2 uniqueword3 end")}])
@@ -100,3 +100,23 @@ def test_old_saved_basis_remains_unchanged_when_presented():
     before = copy.deepcopy(old)
     assert result_state(old)["score_available"]
     assert old == before
+
+
+def test_classified_exact_similar_union_uses_one_eligible_denominator():
+    sentence = "Participants reported their age gender and political identity at the end of the online survey session"
+    target = document("Cover and funding words.", "Abstract\n" + sentence
+                      + '.\n\n"excluded quoted manuscript words are not scored here today"\n\nReferences\nExcluded source citation.')
+    text = sentence.replace("political", "religious") + "."
+    result = classify_report(target, [{"id": "a", "document": document("Source introduction. " + text)},
+                                     {"id": "b", "document": document("Different introduction. " + text)}])
+    metrics = result["metrics"]
+    denominator = metrics["eligible_words"]
+    assert metrics["exact_words"] > 0 and metrics["similar_only_words"] > 0
+    assert metrics["overlapping_words"] == metrics["exact_words"] + metrics["similar_only_words"]
+    assert metrics["overlap_percent"] == round(100 * metrics["overlapping_words"] / denominator, 2)
+    assert metrics["exact_percent"] == round(100 * metrics["exact_words"] / denominator, 2)
+    assert metrics["similar_only_percent"] == round(100 * metrics["similar_only_words"] / denominator, 2)
+    for source in result["source_coverage"]:
+        assert source["score_denominator_words"] == denominator
+        assert source["exact_percent"] == round(100 * source["exact_words"] / denominator, 2)
+        assert source["similar_only_percent"] == round(100 * source["similar_only_words"] / denominator, 2)

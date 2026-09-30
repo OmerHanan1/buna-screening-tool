@@ -311,7 +311,7 @@ def test_report_adapter_is_compatible_with_existing_consumers():
     report.update(papers=[{"id": "a", "source_number": 1, "status": "compared"}, {"id": "b", "source_number": 2, "status": "compared"}],
                   coverage={"compared": 2})
     assert report["metrics"]["overlapping_words"] == report["metrics"]["exact_words"] + report["metrics"]["similar_only_words"]
-    assert report["settings"]["score_basis"] == "abstract-onward-word-units"
+    assert report["settings"]["score_basis"] == "eligible-manuscript-word-units"
     assert {m["kind"] for m in report["matches"]} == {"exact", "near-verbatim"}
     assert {m["match_kind"] for m in report["matches"]} == {"exact", "similar"}
     for m in report["matches"]:
