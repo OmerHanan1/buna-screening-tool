@@ -86,15 +86,167 @@ def evaluate(report, gold, expected_source_count=61):
                       "Passage-level human agreement for slight same-sentence differences must be adjudicated separately."]}
 
 
+def _reference_probe(report, reference, documents, eligible):
+    """Diagnostic-only LCS inside explicit, source-pinned reference bounds."""
+    if documents is None:
+        return {"status": "unavailable", "reason": "Actual source document required; no alignment was invented."}
+    from buna.classified import tokens
+    from buna.citation_tokens import citation_mask
+    from buna.comparison import _line_join_words, _intervals, _mask
+    from buna.match_diagnostics import alignment_details
+    source = documents.get(reference["source_id"])
+    if not isinstance(source, dict) or not isinstance(source.get("text"), str):
+        raise ValueError("A reference probe requires the original extracted source document.")
+    manifest = {r["source_id"]: r["source_content_sha256"] for r in report["source_coverage"]}
+    if hashlib.sha256(source["text"].encode()).hexdigest() != manifest[reference["source_id"]]:
+        raise ValueError("Reference probe source content/version differs from this comparison.")
+    manuscript = "\n\n".join(page["text"] for page in report["manuscript_pages"])
+    mt = tokens(manuscript, _line_join_words([manuscript]))
+    if ledger_sha256(mt) != report["improved_eng"]["manuscript_ledger_sha256"]:
+        raise ValueError("Cannot reconstruct the original manuscript ledger for the reference probe.")
+    st = tokens(source["text"], _line_join_words([source["text"]]))
+    ma, mb = reference["word_start"], reference["word_end"]
+    sa, sb = reference["source_word_start"], reference["source_word_end"]
+    if not 0 <= sa < sb <= len(st):
+        raise ValueError("Reference source word bounds are outside the original source.")
+    if (mb - ma + 1) * (sb - sa + 1) > 200_000:
+        return {"status": "unavailable", "reason": "Diagnostic alignment exceeds its explicit 200,000-cell work bound; narrow the labeled passage."}
+    mc, sc = citation_mask(manuscript, mt), citation_mask(source["text"], st)
+    excluded_source = _mask(st, _intervals(source))
+    dp = [[0] * (sb - sa + 1) for _ in range(mb - ma + 1)]
+    for a in range(mb - ma - 1, -1, -1):
+        for b in range(sb - sa - 1, -1, -1):
+            equal = (ma + a in eligible and not excluded_source[sa + b] and not mc[ma + a] and not sc[sa + b]
+                     and mt[ma + a][0] == st[sa + b][0])
+            dp[a][b] = 1 + dp[a + 1][b + 1] if equal else max(dp[a + 1][b], dp[a][b + 1])
+    a = b = 0
+    path = []
+    while a < mb - ma and b < sb - sa:
+        equal = (ma + a in eligible and not excluded_source[sa + b] and not mc[ma + a] and not sc[sa + b]
+                 and mt[ma + a][0] == st[sa + b][0])
+        if equal:
+            path.append((ma + a, sa + b))
+            a, b = a + 1, b + 1
+        elif dp[a + 1][b] >= dp[a][b + 1]:
+            a += 1
+        else:
+            b += 1
+    if not path:
+        return {"status": "no-equal-prose", "source": reference["source_id"],
+                "matched_non_citation_words": 0, "longest_exact_run": 0, "seed": None,
+                "manuscript_span": [ma, mb], "source_span": [sa, sb],
+                "manuscript_density": 0, "source_density": 0,
+                "manuscript_gap_sequence": [], "source_gap_sequence": [],
+                "citation_matches": {"count": 0, "aligned_pairs": []},
+                "citation_tokens_inside_span": {"manuscript": sum(mc[ma:mb]), "source": sum(sc[sa:sb])},
+                "reason": "No equal eligible noncitation words in these actual labeled manuscript/source ranges."}
+    return {"status": "computed", "source": reference["source_id"],
+            "basis": "Diagnostic-only deterministic LCS in labeled bounds; not a substitute for detector alternative search.",
+            "crosses_exclusion_boundary": (any(i not in eligible for i in range(path[0][0], path[-1][0] + 1))
+                                          or any(excluded_source[path[0][1]:path[-1][1] + 1])),
+            **alignment_details(tuple(path), [w[0] for w in mt], [w[0] for w in st], mc, sc)}
+
+
+def evaluate_passages(report, gold, expected_source_count=61, source_documents=None):
+    word_metrics = evaluate(report, gold, expected_source_count)
+    eligible = {i for item in report["classification"]["coverage_intervals"] if not item["state"].startswith("excluded")
+                for i in range(item["word_start"], item["word_end"])}
+    references = [ref for ref in gold["passages"] if any(i in eligible for i in range(ref["word_start"], ref["word_end"]))]
+    predictions = [m for m in report["matches"] if not m.get("excluded_from_score") and set(m["scored_word_positions"]) & eligible]
+    source_lengths = {r["source_id"]: r.get("source_total_words") for r in report["source_coverage"]}
+    for ref in references:
+        if not all(isinstance(ref.get(key), int) for key in ("source_word_start", "source_word_end")):
+            raise ValueError("Passage agreement requires source occurrence word bounds for every reference passage.")
+        if (not 0 <= ref["source_word_start"] < ref["source_word_end"]
+                or (source_lengths[ref["source_id"]] is not None
+                    and ref["source_word_end"] > source_lengths[ref["source_id"]])):
+            raise ValueError("Reference source occurrence bounds are invalid.")
+
+    def overlap_smaller(a, b):
+        return max(0, min(a[1], b[1]) - max(a[0], b[0])) / min(a[1] - a[0], b[1] - b[0])
+
+    edges = {("reference", i): set() for i in range(len(references))}
+    edges.update({("detector", i): set() for i in range(len(predictions))})
+    for i, ref in enumerate(references):
+        mspan, sspan = (ref["word_start"], ref["word_end"]), (ref["source_word_start"], ref["source_word_end"])
+        for j, match in enumerate(predictions):
+            if ref["source_id"] != match["source_id"]:
+                continue
+            if (overlap_smaller(mspan, (match["manuscript"]["word_start"], match["manuscript"]["word_end"])) >= .5
+                    and overlap_smaller(sspan, (match["source"]["word_start"], match["source"]["word_end"])) >= .5):
+                edges["reference", i].add(("detector", j))
+                edges["detector", j].add(("reference", i))
+    categories = {key: [] for key in ("A", "B", "C", "D")}
+    visited = set()
+    for node in edges:
+        if node in visited:
+            continue
+        pending, group = [node], set()
+        while pending:
+            current = pending.pop()
+            if current in group:
+                continue
+            group.add(current)
+            pending.extend(edges[current] - group)
+        visited.update(group)
+        refs = [references[i] for kind, i in sorted(group) if kind == "reference"]
+        detected = [predictions[i] for kind, i in sorted(group) if kind == "detector"]
+        reference_words = {i for ref in refs for i in range(ref["word_start"], ref["word_end"])} & eligible
+        detected_words = {i for m in detected for i in m["scored_word_positions"]} & eligible
+        if refs and detected:
+            common = reference_words & detected_words
+            union = reference_words | detected_words
+            small_boundary = bool(common) and (
+                abs(min(reference_words) - min(detected_words)) <= 2
+                and abs(max(reference_words) - max(detected_words)) <= 2
+                and all(i < min(common) or i > max(common) for i in reference_words ^ detected_words))
+            category = "A" if small_boundary or len(common) / len(union) >= .8 else "D"
+        else:
+            category = "B" if refs else "C"
+        item = {
+            "source": refs[0]["source_id"] if refs else detected[0]["source_id"],
+            "reference_passages": refs,
+            "detector_match_indices": [i for kind, i in sorted(group) if kind == "detector"],
+            "reference_words": len(reference_words), "detector_words": len(detected_words),
+            "shared_words": len(reference_words & detected_words),
+            "diagnostics": [m.get("diagnostics", {"status": "unavailable", "reason": "Saved report lacks actual alignment diagnostics."})
+                            for m in detected],
+        }
+        if category == "B":
+            item["diagnostics"] = [_reference_probe(report, ref, source_documents, eligible) for ref in refs]
+        categories[category].append(item)
+    diagnostics_complete = all(d.get("status") != "unavailable" for key in ("B", "C", "D")
+                               for item in categories[key] for d in item["diagnostics"])
+    return {
+        "metric_version": "source-linked-passage-agreement-v1", "source_comparison_complete": True,
+        "calibration_complete": diagnostics_complete,
+        "categories": categories, "counts": {key: len(value) for key, value in categories.items()},
+        "labels": {"A": "Crossref + improvedEng", "B": "Crossref only", "C": "improvedEng only", "D": "Partial disagreement"},
+        "word_metrics": word_metrics,
+        "evaluation_rubric": {"minimum_overlap_of_smaller_span_on_both_documents": .5,
+                              "word_jaccard_agreement": .8, "small_boundary_tolerance_words": 2,
+                              "not_detector_thresholds": True,
+                              "D_is_partial_not_a_complete_false_positive_or_negative": True},
+        "diagnostic_completeness": diagnostics_complete,
+    }
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("report", type=Path)
     parser.add_argument("gold", type=Path)
     parser.add_argument("destination", type=Path)
     parser.add_argument("--expected-sources", type=int, default=61)
+    parser.add_argument("--source-documents", type=Path, help="JSON object of source IDs to original extracted documents for B probes.")
+    parser.add_argument("--word-only", action="store_true", help="Export the older strict word sets without passage relationship grouping.")
     args = parser.parse_args()
     try:
-        result = evaluate(json.loads(args.report.read_text()), json.loads(args.gold.read_text()), args.expected_sources)
+        report, gold = json.loads(args.report.read_text()), json.loads(args.gold.read_text())
+        if args.word_only:
+            result = evaluate(report, gold, args.expected_sources)
+        else:
+            documents = json.loads(args.source_documents.read_text()) if args.source_documents else None
+            result = evaluate_passages(report, gold, args.expected_sources, documents)
     except (ValueError, KeyError) as exc:
         parser.error(str(exc))
     args.destination.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")

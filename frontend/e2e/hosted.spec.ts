@@ -432,7 +432,7 @@ test(`${model} requires explicit selection and resets for a new comparison`, asy
     if (url.pathname.endsWith(".csv")) return route.fulfill({ contentType: "text/csv", body: "source,anchor_length\n1,4\n" });
     return route.fulfill({ json: {
       id: "model-fixture", status: "complete", comparison_model: postedModel,
-      algorithm_version: postedModel === "improvedEng" ? "improvedEng-v2" : postedModel,
+      algorithm_version: postedModel === "improvedEng" ? "improvedEng-v1-citation" : postedModel,
       checked: 44, total: 44, overlap_percent: 12.5, score_available: true,
       classification_counts: { exact_words: 9, similar_only_words: 6, unmatched_words: 10, not_fully_checked_words: 0 },
     } });
@@ -444,7 +444,7 @@ test(`${model} requires explicit selection and resets for a new comparison`, asy
   await page.getByText("Advanced", { exact: true }).click();
   await expect(page.getByLabel("Comparison model")).toHaveValue("validated-lexical");
   await page.getByLabel("Comparison model").selectOption(model);
-  await expect(page.getByText(model === "improvedEng" ? /Experimental: exact matches unchanged/ : /Experimental: separates exact wording/)).toBeVisible();
+  await expect(page.getByText(model === "improvedEng" ? /Experimental: restored three-word-seeded/ : /Experimental: separates exact wording/)).toBeVisible();
   await page.getByLabel("Your paper", { exact: true }).setInputFiles({ name: "synthetic.txt", mimeType: "text/plain", buffer: Buffer.from("Original synthetic target text.") });
   await page.getByRole("checkbox", { name: /authorized to upload/ }).check();
   await page.getByRole("button", { name: "Compare papers", exact: true }).click();

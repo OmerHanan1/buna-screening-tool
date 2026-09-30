@@ -1,14 +1,16 @@
-"""Opt-in exact matches and precision-first anchored extension; not a vendor model."""
+"""Restored v1 ordered alignment with citation-only qualification correction."""
 from __future__ import annotations
 
 import hashlib
 import math
 import time
+from bisect import bisect_left, bisect_right
 from collections import defaultdict
 from dataclasses import asdict, dataclass
 from typing import Callable, Iterator
-from buna.anchored_matching import PROFILE, anchored_paths, citation_mask
+from buna.citation_tokens import citation_mask
 from buna.span_evaluation import ledger_sha256
+from buna.match_diagnostics import alignment_details
 
 from buna.classified import (
     _attribution, _exact_runs, _regions, _side, tokens,
@@ -24,7 +26,7 @@ from buna.score_policy import (
 )
 
 MODEL_ID = "improvedEng"
-VERSION = "improvedEng-v2"
+VERSION = "improvedEng-v1-citation"
 NORMALIZATION_VERSION = "nfkc-casefold-literal-numeric-document-local-hyphens-v1"
 WORKING_INDEX_BYTES = 128 * 1024 * 1024
 Pair = tuple[int, int]
@@ -33,16 +35,16 @@ Path = tuple[Pair, ...]
 
 @dataclass(frozen=True)
 class Config:
-    anchor_size: int = 4
+    anchor_size: int = 3
     min_matched_words: int = 9
-    max_gap: int = 2
-    min_region_similarity: float = 0.70
+    max_gap: int = 5
+    min_region_similarity: float = 0.60
     max_total_span: int | None = None
 
     def __post_init__(self):
-        if (self.anchor_size != 4 or self.min_matched_words != 9 or self.max_gap != 2
-                or self.min_region_similarity != 0.70 or self.max_total_span is not None):
-            raise ValueError("improvedEng-v2 uses the provisional anchored 4/9/2/0.70 profile with no span cap.")
+        if (self.anchor_size != 3 or self.min_matched_words != 9 or self.max_gap != 5
+                or self.min_region_similarity != 0.60 or self.max_total_span is not None):
+            raise ValueError("Restored improvedEng uses the fixed 3/9/5/0.60 profile with no span cap.")
 
 
 class SearchLimit(Exception):
@@ -77,8 +79,8 @@ def _seed_ends(path: Path) -> list[int]:
     return ends
 
 
-def valid(path: Path) -> bool:
-    if len(path) < 9 or not _seed_ends(path):
+def valid(path: Path, seed_bounds=None) -> bool:
+    if len(path) < 9 or not (_seed_ends(path) if seed_bounds is None else seed_bounds):
         return False
     if any(b[0] <= a[0] or b[1] <= a[1] for a, b in zip(path, path[1:])):
         return False
@@ -88,29 +90,35 @@ def valid(path: Path) -> bool:
             and 5 * len(path) >= 3 * info["source_span"])
 
 
-def _windows(path: Path, check: Callable[[], None]) -> Iterator[Path]:
+def _windows(path: Path, check: Callable[[], None], seed_bounds=None) -> Iterator[Path]:
     """All inclusion-maximal valid windows of one gap-legal monotone path."""
     check()
     if len(path) < 9:
         return
-    ends = _seed_ends(path)
-    if not ends:
+    bounds = [(end - 2, end) for end in _seed_ends(path)] if seed_bounds is None else seed_bounds
+    if not bounds:
         return
-    if valid(path):
+    if valid(path, bounds):
         yield path
         return
     # A failed density prefix may recover; only containing valid windows dominate.
-    covered_end, seed_cursor = -1, 0
+    earliest = {}
+    for start, end in bounds:
+        earliest[start] = min(earliest.get(start, len(path)), end)
+    required = [len(path)] * len(path)
+    minimum = len(path)
+    for start in range(len(path) - 1, -1, -1):
+        minimum = min(minimum, earliest.get(start, len(path)))
+        required[start] = minimum
+    covered_end = -1
     for start in range(len(path) - 8):
         check()
-        while seed_cursor < len(ends) and ends[seed_cursor] < start + 2:
-            seed_cursor += 1
-        if seed_cursor == len(ends):
+        if required[start] == len(path):
             break
         for end in range(len(path) - 1, max(start + 7, covered_end), -1):
             check()
             count = end - start + 1
-            if (ends[seed_cursor] <= end
+            if (required[start] <= end
                     and 5 * count >= 3 * (path[end][0] - path[start][0] + 1)
                     and 5 * count >= 3 * (path[end][1] - path[start][1] + 1)):
                 covered_end = end
@@ -118,19 +126,43 @@ def _windows(path: Path, check: Callable[[], None]) -> Iterator[Path]:
                 break
 
 
+def _retrieval_bounds(path, mw, sw, m_cited, s_cited, check):
+    """Mixed prose/citation seeds retrieve, but citation-only seeds never do."""
+    positions = set(path)
+    mpos, spos = [a for a, _ in path], [b for _, b in path]
+    bounds = set()
+    for a, b in path:
+        check()
+        for offset in (0, 1, 2):
+            i, j = a - offset, b - offset
+            if i < mpos[0] or j < spos[0] or i + 2 > mpos[-1] or j + 2 > spos[-1]:
+                continue
+            if mw[i:i + 3] != sw[j:j + 3]:
+                continue
+            prose = [(i + k, j + k) for k in range(3) if not m_cited[i + k] and not s_cited[j + k]]
+            if prose and all(pair in positions for pair in prose):
+                first = min(bisect_right(mpos, i) - 1, bisect_right(spos, j) - 1)
+                last = max(bisect_left(mpos, i + 2), bisect_left(spos, j + 2))
+                bounds.add((first, last))
+    return sorted(bounds)
+
+
 def _neighbors(pair: Pair, mw: list[str], sw: list[str], mr: list[int], sr: list[int],
-               m_ok: list[bool], s_ok: list[bool], direction: int) -> list[Pair]:
+               m_ok: list[bool], s_ok: list[bool], m_cited: list[bool], s_cited: list[bool],
+               direction: int) -> list[Pair]:
     i, j = pair
     result = []
     for di in range(1, 7):
         a = i + di * direction
         if not 0 <= a < len(mw) or mr[a] != mr[i] or not m_ok[a]:
             break
+        if m_cited[a]:
+            continue
         for dj in range(1, 7):
             b = j + dj * direction
             if not 0 <= b < len(sw) or sr[b] != sr[j] or not s_ok[b]:
                 break
-            if mw[a] == sw[b]:
+            if not s_cited[b] and mw[a] == sw[b]:
                 result.append((a, b))
     return result
 
@@ -154,14 +186,19 @@ def _paths(graph: dict[Pair, tuple[Pair, ...]], check: Callable[[], None]) -> It
 
 
 def search(mw: list[str], sw: list[str], m_ok: list[bool], s_ok: list[bool],
-           check: Callable[[], None], *, working_bytes: int = WORKING_INDEX_BYTES) -> Iterator[Path]:
-    """Frozen v1 reference for oracle regression only; v2 reports never call this."""
+           check: Callable[[], None], *, working_bytes: int = WORKING_INDEX_BYTES,
+           m_cited: list[bool] | None = None, s_cited: list[bool] | None = None) -> Iterator[Path]:
+    """Original v1 search; citations cannot form seeds alone or qualify graph nodes."""
+    m_cited = m_cited if m_cited is not None else [False] * len(mw)
+    s_cited = s_cited if s_cited is not None else [False] * len(sw)
+    if not (len(mw) == len(m_ok) == len(m_cited) and len(sw) == len(s_ok) == len(s_cited)):
+        raise ValueError("Eligibility/citation masks must use the original word ledger.")
     mr, sr = _regions(m_ok), _regions(s_ok)
     table: dict[tuple[str, ...], list[int]] = defaultdict(list)
     index_bytes = 0
     for j in range(len(sw) - 2):
         check()
-        if all(s_ok[j:j + 3]) and sr[j] == sr[j + 2]:
+        if all(s_ok[j:j + 3]) and sr[j] == sr[j + 2] and not all(s_cited[j:j + 3]):
             index_bytes += 384
             if index_bytes > working_bytes:
                 raise SearchLimit("index-memory-limit", "Trigram index reached the working-memory budget.")
@@ -169,30 +206,32 @@ def search(mw: list[str], sw: list[str], m_ok: list[bool], s_ok: list[bool],
     seen: set[Pair] = set()
     for i in range(len(mw) - 2):
         check()
-        if not all(m_ok[i:i + 3]) or mr[i] != mr[i + 2]:
+        if not all(m_ok[i:i + 3]) or mr[i] != mr[i + 2] or all(m_cited[i:i + 3]):
             continue
         for j in table.get(tuple(mw[i:i + 3]), ()):
             check()
-            if (i, j) in seen:
+            prose = [(i + k, j + k) for k in range(3) if not m_cited[i + k] and not s_cited[j + k]]
+            if not prose or prose[0] in seen:
                 continue
-            frontier = [(i, j)]
-            nodes = {(i, j)}
+            frontier = [prose[0]]
+            nodes = {prose[0]}
             graph: dict[Pair, tuple[Pair, ...]] = {}
             while frontier:
                 check()
                 if index_bytes + 160 * len(seen) + 4096 * len(nodes) > working_bytes:
                     raise SearchLimit("alignment-memory-limit", "Ordered alignment graph reached the working-memory budget.")
                 pair = frontier.pop()
-                successors = _neighbors(pair, mw, sw, mr, sr, m_ok, s_ok, 1)
+                successors = _neighbors(pair, mw, sw, mr, sr, m_ok, s_ok, m_cited, s_cited, 1)
                 # Remove only edges with an insertable equal pair between endpoints.
                 graph[pair] = tuple(sorted(p for p in successors if not any(
                     q[0] < p[0] and q[1] < p[1] for q in successors)))
-                for neighbor in successors + _neighbors(pair, mw, sw, mr, sr, m_ok, s_ok, -1):
+                for neighbor in successors + _neighbors(pair, mw, sw, mr, sr, m_ok, s_ok, m_cited, s_cited, -1):
                     if neighbor not in nodes:
                         nodes.add(neighbor)
                         frontier.append(neighbor)
             for path in _paths(graph, check):
-                yield from _windows(path, check)
+                seeds = _retrieval_bounds(path, mw, sw, m_cited, s_cited, check)
+                yield from _windows(path, check, seeds)
             seen.update(nodes)
 
 
@@ -332,13 +371,13 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
             continue
         scored_paths: list[Path] = []
         audit_paths: list[Path] = []
-        diagnostics = {}
         st = []
         phase = "scored"
         try:
             budget()
             st = tokens(document["text"], _line_join_words([document["text"]]), budget)
             sw = [t[0] for t in st]
+            row["source_total_words"] = len(sw)
             s_cited = citation_mask(document["text"], st)
             row["source_content_sha256"] = hashlib.sha256(document["text"].encode()).hexdigest()
             s_ok = [not b for b in _mask(st, _intervals(document))]
@@ -355,27 +394,18 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
                     _collect(scored_paths, tuple(zip(range(a, e), range(b, f))), evidence_budget, budget)
             except ExactLimit as exc:
                 raise SearchLimit(exc.kind, exc.reason) from exc
-            for path, diagnostic in anchored_paths(mw, sw, eligible, s_ok, m_cited, s_cited,
-                                                   budget, SearchLimit, working_bytes=WORKING_INDEX_BYTES):
-                if path not in diagnostics:
-                    evidence_budget.add(2048)
+            for path in search(mw, sw, eligible, s_ok, budget, m_cited=m_cited, s_cited=s_cited,
+                               working_bytes=WORKING_INDEX_BYTES):
                 _collect(scored_paths, path, evidence_budget, budget)
-                if path in scored_paths and path not in diagnostics:
-                    diagnostics[path] = diagnostic
             row["scored_search_complete"] = True
             phase = "audit"
             # Audit work must not consume the rest of the budget for later sources.
             audit_deadline = min(started + fair_seconds, time.monotonic() + fair_seconds * 0.1)
             if not all(eligible) or not all(s_ok):
-                for path, diagnostic in anchored_paths(
-                        mw, sw, [True] * len(mw), [True] * len(sw), m_cited, s_cited,
-                        budget, SearchLimit, working_bytes=WORKING_INDEX_BYTES):
+                for path in search(mw, sw, [True] * len(mw), [True] * len(sw), budget,
+                                   m_cited=m_cited, s_cited=s_cited, working_bytes=WORKING_INDEX_BYTES):
                     if not all(eligible[path[0][0]:path[-1][0] + 1]) or not all(s_ok[path[0][1]:path[-1][1] + 1]):
-                        if path not in diagnostics:
-                            evidence_budget.add(2048)
                         _collect(audit_paths, path, evidence_budget, budget)
-                        if path in audit_paths and path not in diagnostics:
-                            diagnostics[path] = diagnostic
                 try:
                     for a, e, b, f in _exact_runs(mw, [True] * len(mw), [0] * len(mw), sw, [True] * len(sw),
                                                 [0] * len(sw), 9, budget):
@@ -401,7 +431,7 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
                 kind = "exact" if info["matched_words"] == info["manuscript_span"] == info["source_span"] else "similar"
                 # Reserve strings and offset arrays before materializing the report.
                 try:
-                    evidence_budget.add(8192 + 256 * len(path) + 8 * (
+                    evidence_budget.add(10240 + 512 * len(path) + 8 * (
                         mt[path[-1][0]][2] - mt[path[0][0]][1] + st[path[-1][1]][2] - st[path[0][1]][1]))
                 except SearchLimit as exc:
                     if not excluded:
@@ -440,15 +470,12 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
                               "source_unmatched": info["source_span"] - len(path)},
                     "order": {"out_of_order_blocks": 0},
                 }
-                if kind == "similar":
-                    diagnostic = diagnostics[path]
-                    match["diagnostics"] = {
-                        "source": sid, "source_content_sha256": row["source_content_sha256"],
-                        "manuscript_span": [m_positions[0], m_positions[-1] + 1],
-                        "source_span": [s_positions[0], s_positions[-1] + 1],
-                        "matched_word_count": len(path), **diagnostic,
-                        "scored": not excluded,
-                    }
+                match["diagnostics"] = {
+                    **alignment_details(path, mw, sw, m_cited, s_cited),
+                    "source": sid, "source_content_sha256": row["source_content_sha256"],
+                    "match_kind": kind, "exact_citation_policy": "unchanged; citation qualification correction applies to Similar",
+                    "scored": not excluded,
+                }
                 (raw if excluded else matches).append(match)
                 if not excluded:
                     (exact_words if kind == "exact" else similar_words)[sid].update(m_positions)
@@ -513,7 +540,13 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
     matches.sort(key=lambda m: (m["manuscript"]["match_start"], m["source_id"], m["source"]["match_start"], m["aligned_pairs"]))
     settings = {"minimum_matched_words": 9, "exclude_bibliography": True, "exclude_quotes": exclude_quotes,
                 "score_basis": SCORE_BASIS, "score_policy_version": SCORE_POLICY_VERSION,
-                "manuscript_scope": scope, "improved_eng_config": {**asdict(cfg), **PROFILE},
+                "manuscript_scope": scope, "improved_eng_config": asdict(cfg),
+                "citation_qualification": {
+                    "scope": "Similar only; Exact unchanged",
+                    "seed": "Citation-only seeds prohibited; mixed seeds retrieve without qualifying citation pairs",
+                    "minimum_and_density_numerator": "Noncitation equal pairs only",
+                    "gap_and_span_accounting": "Original word positions, including intervening citations",
+                },
                 "normalization_version": NORMALIZATION_VERSION, "source_time_limit_seconds": source_seconds,
                 "total_time_limit_seconds": total_time_limit_seconds, "working_index_limit_mib": 128}
     return {
@@ -526,18 +559,19 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
         "classification": {"engine_candidate": VERSION, "normalization_version": NORMALIZATION_VERSION,
                            "metrics": metrics, "coverage_intervals": intervals,
                            "labels": {"similar": "Ordered equal wording with gaps; no reordering or semantic matching."}},
-        "improved_eng": {"config": {**asdict(cfg), **PROFILE}, "raw_excluded_evidence": raw,
+        "improved_eng": {"config": asdict(cfg), "raw_excluded_evidence": raw,
                          "manuscript_ledger_sha256": ledger_sha256(mt),
                          "similar_diagnostics": [m["diagnostics"] for m in matches + raw if m["match_kind"] == "similar"],
+                         "alignment_diagnostics": [m["diagnostics"] for m in matches + raw],
                          "calibration_ready": bool(coverage) and denominator > 0 and all(r["status"] == "compared" for r in coverage),
                          "audit_complete": bool(coverage) and all(
                              r["audit_search_complete"] or r["status"] in {"excluded-by-user", "excluded-identical"}
                              for r in coverage),
-                         "search": "Strong content-word anchor; limited bidirectional extension; local/cumulative continuity; explicit limits."},
+                         "search": "Restored v1 three-word-seeded ordered alternatives; citations retain coordinates but cannot qualify Similar pairs."},
         "methodology": {
             "name": MODEL_ID, "version": VERSION, "normalization": NORMALIZATION_VERSION,
             "exact": "Contiguous equal normalized word units, at least nine.",
-            "similar": "Four contiguous matching content words anchor at least nine qualifying equal pairs; local 70% density over12 prose tokens; maximum gap2, cumulative gap6 per side, at most3 gap events. Citation tokens cannot qualify.",
+            "similar": "At least nine noncitation equal words, exact three-word retrieval seed, gap at most five per side and global density at least 60% per side; citation positions remain in gap/span denominators.",
             "denominator": DENOMINATOR_DESCRIPTION,
             "limitations": "Lexical hypotheses, not vendor parameters. No seed means no candidate. Literal numbers; no citation removal. Resource-limited search is explicitly partial.",
         },

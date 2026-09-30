@@ -76,17 +76,17 @@ def test_seed_and_minimum():
         assert result["metrics"]["score_denominator_words"] == size
 
 
-def test_v1_weak_islands_no_longer_qualify_as_similar():
+def test_restored_fragmented_islands_qualify_without_content_anchors():
     m = "a b c d x x e f g y h i j"
     s = "a b c d q e f g r h i j"
     result = improved_report(document(m), [
         {"id": "z", "document": document(s)}, {"id": "a", "document": document(s + " ending")},
     ])
-    assert result["metrics"]["overlapping_words"] == 0
+    assert result["metrics"]["overlapping_words"] == 10
     assert result["metrics"]["eligible_words"] == 13
     assert result["metrics"]["exact_words"] == 0
-    assert not result["matches"]
-    assert all(row["overlapping_words"] == 0 for row in result["source_coverage"])
+    assert result["matches"]
+    assert all(row["overlapping_words"] == 10 for row in result["source_coverage"])
 
 
 def test_exact_subrun_precedence_inside_larger_similar_passage():
@@ -270,14 +270,14 @@ def test_cancellation_inside_repetitive_graph():
 
 
 def test_audit_limit_is_not_scored_search_failure(monkeypatch):
-    original = engine.anchored_paths
+    original = engine.search
 
     def audit_limit(mw, sw, m_ok, s_ok, *args, **kwargs):
         if all(m_ok):
             raise engine.SearchLimit("source-time-limit", "Audit budget ended.")
         yield from original(mw, sw, m_ok, s_ok, *args, **kwargs)
 
-    monkeypatch.setattr(engine, "anchored_paths", audit_limit)
+    monkeypatch.setattr(engine, "search", audit_limit)
     result = report('a b c d e f g h i "excluded quote"', "a b c d e f g h i")
     assert result["metrics"]["overlapping_words"] == 9
     assert result["source_coverage"][0]["scored_search_complete"]

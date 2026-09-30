@@ -1,168 +1,156 @@
-# improvedEng-v2: anchored Similar matching (experimental)
+# improvedEng: restored ordered alignment with citation qualification
 
-The model selector is still `improvedEng`; new reports record algorithm version
-`improvedEng-v2`. Standard remains the default. Neither other engine is changed,
-and saved v1 reports retain their original rules and values.
+New comparisons use model ID `improvedEng`, algorithm version
+`improvedEng-v1-citation`. This restores the previous flexible ordered-alignment
+milestone rather than tuning v2. Standard remains the default; the other engines
+are unchanged. Saved v1/v2 reports retain their own rules and values.
 
-**Exact matching is unchanged:** contiguous equal normalized runs of at least
-nine words are collected independently, including long formulaic wording.
-Only the Similar path is tightened. These parameters are provisional lexical
-hypotheses, not published Crossref/iThenticate parameters or a parity claim.
+## Restored matching rules
 
-## Separate anchor strength and extension tolerance
+Similar matching again uses overlapping exact **three-word retrieval seeds**,
+ordered one-to-one equal-word alignments, at least **nine qualifying matched
+words**, gaps of at most **five unmatched words independently per side**, and
+global density of at least **60% independently per side**.
 
-Similar starts from **four contiguous exact matching content words**.
-Each must be alphabetic, at least three characters and outside the existing
-function-word set. Punctuation is not a word. Citation tokens cannot anchor.
+Seeds retrieve candidates; they do not qualify a reportable passage.
+Alternative paths and valid inner passages are retained, not just one greedy
+or maximum-score path. Exclusions remain hard boundaries. Numerator masks use
+only actual matched manuscript positions and union them across evidence/sources.
+Numbers remain literal normalized tokens. There is no semantic model, embedding,
+hidden span/diagonal band, top-K, beam limit or sentence cutoff.
 
-To reduce generic anchors without a phrase blacklist, at least two anchor words
-must not be common in both documents. A common word occurs at least three times
-and at least 0.5% of noncitation tokens in that document. This is an explicitly
-reported **document-pair frequency proxy**, not a full-corpus document-frequency
-model. It avoids a corpus prepass, source-order dependence and silently changing
-the word ledger when sources are unavailable. Real-corpus calibration remains
-necessary, especially for short or specialized papers.
+The v2 four-content-word anchor, every-window density, cumulative-gap limit,
+informative-word requirement and generic/academic-language suppression are
+removed from the implementation. Formulaic Methods/Results wording can match.
+The acceptance thresholds above are frozen until actual B/C/D diagnostics are
+reviewed. No parameter is tuned toward a 13% aggregate score.
 
-Each seed extends left and then right through one-to-one, ordered equal prose
-words. Alternative continuations are retained within explicit resource limits.
-At every extension step the candidate must satisfy:
+## The sole Similar precision correction: citations
 
-| Constraint | Provisional v2 setting |
-|---|---|
-| Minimum qualifying equal words in a final match instance | 9 |
-| Largest intervening prose gap | 2 independently per side |
-| Total unmatched prose words | 6 independently per side |
-| Number of gap events | 3 |
-| Moving local density | At least 70% in every 12-token window, on each side |
-| Shorter-than-12 spans | Apply 70% to the entire shorter span |
-| Whole-span density | At least 70% on each side |
-| Informative local support | At least two matched noncommon content words in each moving window |
-| Citation interruption | At most 16 citation tokens between matched prose words |
+Explicit bracketed numeric and author-year/narrative citation syntax is masked
+in the **original word ledger**. It is not deleted or compacted. Recognition
+is syntactic, not a guess about every surname or year in prose.
 
-Every moving window is checked, not just disjoint windows or the final global
-average. There is no sentence restriction or maximum total-span cutoff, but
-cumulative gaps prevent weak islands from chaining indefinitely. Strong end
-regions cannot compensate for a weak middle. A branch stops when extension
-violates continuity; its valid inner passage survives. This is not maximum-score
-edit alignment and does not claim to enumerate all possible proprietary matches.
+Citation-only seeds cannot retrieve candidates. A mixed prose/citation exact
+three-word seed may retrieve a candidate, but its citation words do not qualify
+any equal-pair graph nodes. This follows "citations must not form the seed by
+themselves" without adding a new all-content or all-prose anchor restriction.
 
-No nearby-passage union is performed. Pair-containment deduplication removes
-redundant candidates only; distinct or incompatible source occurrences remain.
-Exact subruns retain display precedence inside longer Similar passages.
+Every accepted Similar alignment must independently contain nine equal
+non-citation word pairs. Citation tokens on either side cannot increase the
+minimum-match count or density numerator. They remain intervening tokens:
+five citation words consume a five-word gap, six break it, and nine prose
+matches spanning sixteen original tokens fail 60% density. Citations therefore
+cannot rescue prose that fails the original gap/density rules.
 
-## Citations, normalization and scoring
+Citation text can remain in passage context but is not painted as qualifying
+Similar evidence. Diagnostic `citation_matches` reports citation pairs present
+in the actual saved alignment, not a guessed pairing of surrounding citations.
+For Similar this count is zero by construction; `citation_tokens_inside_span`
+separately exposes the citation material consuming the original span.
 
-Explicit bracketed numeric and author-year/narrative citation syntax is recognized.
-Ordinary surnames without citation syntax are not guessed to be citations.
-Citation tokens contribute **zero** to Similar anchors, minimum qualifying
-matched words, local/global density and Similar scoring. They may be crossed
-within the interruption bound; diagnostics retain their inside-passage counts.
-They remain visible as passage context but are not painted as matched words.
-Exact evidence, including exact citation text, is unchanged by this Similar policy.
+**Exact matching is unchanged**, including its treatment of citation text inside
+contiguous exact runs of at least nine normalized words. Exact diagnostic rows
+explicitly identify this exception; the citation correction applies to Similar,
+not a silent modification of the independent Exact path.
 
-Numbers remain literal; isolated differences are tolerated as unmatched prose,
-not treated as equal. Existing Unicode/case, decimal, punctuation, original-offset,
-and document-local line-hyphen normalization is unchanged.
+## Diagnostics and source completion
 
-Abstract-onward scope, recognized bibliography and enabled quotations remain
-hard eligibility boundaries. Excluded words cannot connect scored evidence.
-Discovered excluded-text matches are separate raw audit evidence in JSON.
+Each scored or raw excluded alignment records:
 
-The shared `eligible-manuscript-v1` denominator is unchanged. Otherwise eligible
-unmatched words, citation words, and words in rejected short matches remain in
-the denominator. Missing/excluded sources do not shrink it. The numerator is
-the union of actual accepted manuscript positions, never enclosing passage
-bounds or the sum of per-source percentages. Zero denominator is unscorable.
-Preprint status is not guessed.
+* Source identity/content hash and manuscript/source word spans.
+* Matched non-citation words and longest qualifying exact run.
+* The actual three-word retrieval seed and its original pairs.
+* Density on each side and each side's complete gap sequence.
+* Citation pairs in the alignment and citation tokens inside each span.
 
-## Completion and resource limits
-
-No production limits are raised. The hosted total remains 480 seconds, each
-source at most 120 seconds, working index 128 MiB and evidence 64 MiB.
-Remaining comparison time is fairly apportioned over the remaining selected
-sources instead of allowing early sources to consume the entire deadline.
-Excluded-text auditing gets at most 10% of the current source allocation and
-cannot silently consume all time reserved for later sources.
-
-An interruption remains explicit: `compared-with-limits`, skipped or unavailable.
-Scored search and raw audit completeness are separate fields. The percentage
-on an incomplete report remains a lower bound, not an all-source final score.
-Fair scheduling is not a guarantee of completing an arbitrary 61-source workload.
-`improved_eng.calibration_ready` is false unless every selected source is fully
-compared. Partial sources are never used to label unmarked words "unmatched."
-
-## Diagnostics and downloads
-
-Each Similar match has a `diagnostics` object. The same objects are collected
-in `improved_eng.similar_diagnostics`, including raw excluded candidates with
-`scored: false`. Fields include source/content hash, manuscript/source word spans,
-matched-word count, longest exact run, anchor length/pairs/strength, gap count,
-maximum/total gap words, per-side and minimum local/global density,
-citation-token contribution, and termination reasons.
-
-The normal JSON report includes these records. The UI offers
-**Download Similar diagnostics CSV** for v2 reports using the same report
-ownership gate. A local export also works without rerunning detection:
+Similarity diagnostics remain downloadable as JSON/CSV through the existing
+report ownership gate. Exact alignments also have diagnostic objects for
+source-linked A/B/C/D evaluation. CSV neutralizes spreadsheet formula prefixes.
 
 ```sh
 python -m buna.match_diagnostics report.json similar-diagnostics.csv
 ```
 
-The fixed profile and normalization version are saved, so future calibration can
-compare explicit parameter versions rather than silently reinterpret old reports.
+The existing resource guards, fair remaining-source time allocation and separately
+bounded raw audit remain. No production limit is raised and no changed matching
+threshold is hidden inside scheduling. If any scored search is interrupted,
+that source stays partial; not-visited words are not labeled unmatched.
+Evidence/diagnostic memory exhaustion preserves a valid partial report rather
+than looking up a missing diagnostic entry and losing the report.
 
-## Four-set word/span evaluation
+The shared `eligible-manuscript-v1` denominator remains unchanged. Unmatched
+eligible words, citation words and words in rejected small matches still count.
+Front matter, bibliography and enabled quotation exclusions are counted once.
+Excluded/unavailable sources do not remove manuscript denominator words.
 
-The evaluator refuses incomplete selected-source coverage. By default it requires
-**all 61 sources** fully compared. It also verifies the manuscript word-ledger
-hash, source extracted-content/version hashes and exclusion/scope settings.
+## Source-linked A/B/C/D evaluation
+
+Calibration refuses partial coverage and requires all **61 sources** fully
+compared by default, matching manuscript ledger, source content/version hashes,
+and the same Abstract-onward/bibliography/quotation exclusion settings. Reference
+annotation completeness must be explicitly confirmed; missing labels are not
+silently treated as negative evidence.
 
 ```sh
-python -m buna.span_evaluation report.json gold.json agreement.json
+python -m buna.span_evaluation report.json gold.json passage-agreement.json \
+  --source-documents extracted-sources.json
 ```
 
-Gold JSON must contain:
+`gold.json` contains:
 
-* `annotation_complete: true`: explicit confirmation that absence means a
-  negative label, not an unannotated part of the reference.
-* `manuscript_ledger_sha256`: copied from the correctly matched report after
-  verifying it is the original labeled manuscript.
-* `source_manifest`: object mapping each source ID to its extracted-content SHA-256.
-* `exclusions`: `score_policy_version`, `exclude_quotes`, and the saved
-  `manuscript_scope` object.
-* `passages`: source-linked `{source_id, word_start, word_end}` labels using the
-  same ledger, with half-open word bounds. Do not use unverified PDF rectangle
-  bounds as word labels.
+* `annotation_complete: true`.
+* `manuscript_ledger_sha256` matching the actual labeled manuscript.
+* `source_manifest`: source ID to extracted-text SHA-256.
+* `exclusions`: saved `score_policy_version`, `exclude_quotes`, `manuscript_scope`.
+* `passages`: records with `source_id`, `word_start`, `word_end`,
+  `source_word_start`, `source_word_end`, all half-open original-ledger bounds.
 
-After masking excluded words, every source gets four explicit interval sets:
-Crossref + Detector, Crossref only, Detector only, Neither. Precision, recall
-and F1 count actual source-specific word coverage; a matching word attributed
-only to a different source is not silently credited. Neither counts source-word
-opportunities. Empty precision/recall denominators are null, not fabricated 100%.
-Small wording differences in the same sentence can also be manually adjudicated
-as passage agreement, but that is distinct from these exact word-span metrics.
+`extracted-sources.json` is an offline mapping of source IDs to their original
+extracted document objects. Content hashes are checked before any diagnostic
+alignment. These files are private evaluation inputs, not repository assets.
 
-Do not tune a final percentage toward 13%. Freeze the labeling rubric and model
-profile before independent evaluation; previously inspected reference material is
-development data, not an independent holdout.
+Categories:
 
-## PDF mapping is a separate subsystem
+| Category | Meaning |
+|---|---|
+| A | Crossref + improvedEng: shared passage |
+| B | Crossref only: reference passage needing recall investigation |
+| C | improvedEng only: detector passage needing precision investigation |
+| D | Partial disagreement: same source occurrence/passage, different wording coverage |
 
-Renderer version 8 caches normalized page/glyph maps. If the two PDF extractors
-disagree at a header, column boundary or footnote, short words can additionally
-map inside an **exact block unique in both extractions**. No fuzzy-score placement
-or guessed repeated occurrence is allowed. Existing exact-page/unique-context
-mappings remain available.
+The explicit provisional **evaluation rubric**, not a detector threshold,
+associates overlapping manuscript/source occurrences when each overlap covers
+at least half the shorter span. Connected reference/detector groups account for
+split highlights without forcing one-to-one passage labels. Word-set Jaccard
+agreement of 0.8 or boundary-only differences of at most two words count as A;
+larger differences count as D, not a whole false positive plus a whole miss.
+The rubric is emitted with results for review; source-occurrence bounds are
+required so a different location in the same paper is not silently credited.
 
-Mapping failure never changes detector evidence or the overlap score. Hosted
-reports now retain the renderer's full `pdf_mapping` manifest in downloadable JSON
-(previously the hosted worker discarded that return value), including failed
-ranges, page/source IDs, reasons and method counts. Local mapping JSON remains
-available separately. A renderer version change invalidates only PDF caches;
-it does not rerun detection or reinterpret saved scores.
+C/D diagnostics come from actual saved detector pairs. B diagnostics use an
+explicitly labeled, bounded **diagnostic-only LCS** inside the reference's
+original manuscript/source bounds, excluding nonqualifying words while preserving
+their coordinates. This does not run in detection, change scores, or replace
+the detector's alternative-path search. A probe over 200,000 cells is marked
+unavailable rather than silently truncated.
 
-The specific report named "new detector report 21.7.pdf", its evidence JSON,
-verified 61-source input manifest and source-linked Crossref labels were not
-available during this revision. Synthetic tests validate the changes, but do
-not establish that its 52 unmapped ranges are repaired, that its actual 61-source
-comparison completes, or that real-reference precision/recall has improved.
+If actual source text is missing, B diagnostics are marked unavailable and
+`calibration_complete` is false. No diagnostic alignment is invented from PDF
+rectangles or source names. Strict word precision/recall and source-specific word
+sets remain available under `word_metrics`; `--word-only` exports the older
+word-only view. Passage-level D is intentionally not equivalent to a complete
+word-level miss.
+
+## PDF mapping and current evidence limits
+
+PDF renderer 8 and its independent exact/unique mapping recovery are retained.
+Mapping failures remain explicit in hosted `pdf_mapping` JSON and local mapping
+JSON, and never change detection scores. Saved reports are not recomputed when
+a PDF is regenerated.
+
+The exact `paper-overlap-report (3).pdf`, evidence JSON, verified 61-source
+snapshot and source-linked reference labels were not supplied in this session.
+Synthetic completion and regression tests are not a substitute for running that
+actual case or producing its B/C/D examples. No further precision/recall tuning
+or assertion of vendor equivalence is justified until those diagnostics exist.

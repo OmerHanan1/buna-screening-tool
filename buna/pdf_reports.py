@@ -517,6 +517,8 @@ def generate_pdf(payload: dict, destination: Path) -> dict:
                  f"<b>S · Similar wording</b> only: {int(counts.get('similar_only_words', 0))} words · "
                  f"Combined: {int(counts.get('combined_words', 0))} unique words.</p>")
         similar_description = (
+            "restored ordered alignment: at least nine non-citation equal words, gaps at most five and global density at least 60% per side; citation positions remain in spans"
+            if report.get("algorithm_version") == "improvedEng-v1-citation" else
             "strong content-word anchor with limited extension, at least nine qualifying words and local continuity; citations do not qualify"
             if report.get("algorithm_version") == "improvedEng-v2" else
             "ordered shared wording, at least nine equal words, gap at most five and density at least 60% per side"

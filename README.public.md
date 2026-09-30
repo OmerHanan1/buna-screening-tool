@@ -60,11 +60,13 @@ normalization can differ, and no superiority or vendor-equivalence claim is made
 See [the model and limitations](docs/experimental-wording.md).
 
 A third optional **Advanced > improvedEng** model keeps exact matching separate
-from Similar passages established by a four-content-word exact anchor and
-bounded extension with local-density and cumulative-gap constraints. Similar
-instances need at least nine qualifying matched words; citations cannot qualify
-them. JSON/CSV diagnostics and complete-corpus word/span evaluation support
-calibration without tuning an aggregate percentage. It retains the same eligible-word scoring
+from the restored flexible ordered-alignment Similar path: three-word retrieval
+seeds, at least nine non-citation matched words, gaps at most five and global
+density at least 60% independently per side. Citation positions remain in gaps
+and spans, but cannot qualify Similar matches. No content-word, generic-language
+or sliding-density restriction is imposed. JSON/CSV diagnostics and complete-corpus
+A/B/C/D passage evaluation support calibration without tuning an aggregate
+percentage. It retains the same eligible-word scoring
 policy and leaves both existing engines unchanged. It is experimental, may
 report partial coverage on difficult inputs, and makes no Crossref-equivalence
 claim. See [improvedEng rules, audit evidence and limitations](docs/improved-eng.md).

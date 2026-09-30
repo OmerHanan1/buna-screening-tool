@@ -21,9 +21,9 @@ from buna.pdf_reports import generate_pdf
 
 
 EXACT = "amber birds gather beside quiet rivers during winter mornings while copper sensors record signals".split()
-NEAR = "robust cortical neural signals predict distinct emotional responses among adult volunteers".split()
-SOURCE_NEAR = "robust cortical neural signals predict distinct affective responses among adult volunteers".split()
-NEAR_EQUAL = set(range(len(NEAR))) - {6}
+NEAR = "we used a linear mixed effects model to test whether disgust type affected participants responses".split()
+SOURCE_NEAR = "we used a linear mixed effects model to examine the effect of disgust type on participants responses".split()
+NEAR_EQUAL = {0, 1, 2, 3, 4, 5, 6, 7, 10, 11, 13, 14}
 
 
 def document(words):
@@ -69,7 +69,7 @@ def verify(count=61, words=12000, pdf=True):
     assert all(row["status"] == "compared" for row in result["source_coverage"])
     assert not result["metrics"]["truncated"]
     assert result["comparison_model"] == "improvedEng"
-    assert result["algorithm_version"] == "improvedEng-v2"
+    assert result["algorithm_version"] == "improvedEng-v1-citation"
     assert result["improved_eng"]["calibration_ready"]
     assert result["improved_eng"]["similar_diagnostics"]
     assert result["metrics"]["score_policy_version"] == "eligible-manuscript-v1"
