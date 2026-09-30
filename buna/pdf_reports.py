@@ -321,9 +321,9 @@ def _summary_table(report: dict, numbers: dict[str, int], names: dict[str, str])
         reason = result.get("reason")
         if not checked and isinstance(reason, str) and reason:
             label += " · " + reason
-        rows.append(f"<tr id='source-row-{html.escape(str(numbers[sid]))}'><td>#{html.escape(str(numbers[sid]))}</td><td>{html.escape(names[sid])}</td>"
+        rows.append(f"<tr id='source-row-{html.escape(str(numbers[sid]))}'><td style='white-space:nowrap;min-width:32pt'>#{html.escape(str(numbers[sid]))}</td><td>{html.escape(names[sid])}</td>"
                     f"<td>{overlap}</td><td>{html.escape(label)}</td></tr>")
-    header = "<tr><th>No.</th><th>Paper</th><th>Overlap</th><th>Status</th></tr>"
+    header = "<tr><th style='width:36pt'>No.</th><th>Paper</th><th>Overlap</th><th>Status</th></tr>"
     tables = ["<table>" + header + "".join(rows[start:start + 12]) + "</table>"
               for start in range(0, len(rows), 12)]
     fully_checked = sum((source_results.get(str(p["id"]), {}).get("status") or p.get("comparison_status")

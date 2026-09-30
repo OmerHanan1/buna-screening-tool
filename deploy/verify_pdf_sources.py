@@ -40,7 +40,9 @@ def verify():
             assert report == unchanged
             with pymupdf.open(path) as document:
                 summary = "\n".join(document[i].get_text() for i in range(mapping["summary_pages"]))
-                assert re.findall(r"(?m)^#(\d+)\s*$", summary) == [str(i) for i in range(1, count + 1)]
+                identifiers = re.findall(r"(?m)^#(\d+)\s*$", summary)
+                assert identifiers == [str(i) for i in range(1, count + 1)], {
+                    "pymupdf": pymupdf.VersionBind, "expected": count, "rendered_ids": identifiers}
                 assert "5.48%" in summary and "0.00%" in summary and "1.25%" in summary
                 assert "Syntheticsourceunavailable." in re.sub(r"\s+", "", summary)
                 manuscript = document[mapping["summary_pages"]]
