@@ -16,9 +16,39 @@ Unchecked files are not shared. Removing or unchecking an already saved upload
 only affects the current workspace; it never deletes the shared source.
 
 Manuscripts, reports and unselected comparison uploads remain temporary. Opted-in
-sources persist privately across sessions, restarts and scale-down. There is no
-original-source/full-text download route or public shared-library deletion API.
+sources persist privately across sessions, restarts and scale-down unless
+explicitly removed from the shared library. There is no original-source/full-text
+download route.
 No public redistribution license or DOI identity is inferred from an upload.
+
+## Removing a paper versus deselecting it
+
+**Deselecting** changes only the current comparison. **Remove from library** in
+Review papers is a separate, confirmed action affecting **all app users**. The
+confirmation names the paper, explains global impact, and initially focuses
+Cancel. Any visitor admitted through the existing email/capability gate can
+confirm removal; this is not a verified-owner/admin restriction.
+
+Both bundled and user-saved papers can be removed from future library lists and
+selections. Bundled papers get a durable removal record; their private packaged
+bytes remain in the backend image. Do not describe that as physical erasure.
+User-saved papers are hidden immediately and their exact old-version blobs are
+retired for at least two hours, then deleted when the service is running and
+storage is reachable. Temporary comparison snapshots and existing PDF reports
+are unchanged. Retired bytes still count against the storage quota until deletion
+is confirmed; deleting never refunds the daily new-paper allowance.
+
+Catalog changes use ETag compare-and-swap and immutable removal generations.
+Already admitted old saves cannot republish a removed generation. A later
+explicit upload can add the same content again under the new generation; retries
+of an earlier removal cannot delete that newly added version. Stale comparison
+selections are rejected for refresh rather than silently substituted.
+
+The catalog format is additive/backwards-readable. Its first removal creates one
+private, immutable `catalog-before-removals-v1.json` metadata backup, not a backup
+of erased source files. A bounded removal ledger stores source hash, generation,
+time and kind, without email, capability or document text. Library reads fail
+closed during catalog outages rather than resurrecting hidden bundled papers.
 
 ## Readiness, deduplication and snapshots
 

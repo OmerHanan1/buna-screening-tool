@@ -43,6 +43,10 @@ class MemoryBlobs:
         except Conflict:
             assert self.read(name, len(data))[0] == data
 
+    def delete(self, name):
+        with self.lock:
+            self.values.pop(name, None)
+
 
 def document(text="Introduction\nOriginal shared scientific observations are recorded in this synthetic full body."):
     return _structure([{"number": 1, "text": text}], "Synthetic", [])

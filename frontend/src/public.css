@@ -138,3 +138,6 @@ html[data-theme="dark"] .hosted-app .hosted-text-button { color: var(--cp-text-s
   .hosted-dialog-header, .hosted-dialog-tools { padding: 16px; }.hosted-source-list { padding: 0 16px; }.hosted-source-copy small { max-width: calc(100vw - 108px); }
   .hosted-dialog-footer { padding: 14px 16px; }.hosted-dialog-footer span { max-width: 200px; }.hosted-bulk { gap: 14px; }
 }
+.hosted-source-remove { margin: 0.25rem 0 0 1.625rem; }
+.hosted-removal-confirmation { max-width: min(34rem, calc(100vw - 2rem)); padding: 1.5rem; overflow-wrap: anywhere; }
+.hosted-removal-confirmation p { color: var(--cp-text-muted); line-height: 1.5; }

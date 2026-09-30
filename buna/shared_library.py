@@ -9,6 +9,7 @@ import re
 import time
 from pathlib import Path
 from typing import Protocol
+from uuid import uuid4
 
 MAX_PAPERS = 50
 MAX_TOTAL_BYTES = 512 * 1024 * 1024
@@ -18,6 +19,8 @@ MAX_CATALOG_BYTES = 512 * 1024
 MAX_NEW_PER_DAY = 20
 CATALOG = "catalog-v1.json"
 _SHA = re.compile(r"^[0-9a-f]{64}$")
+_VERSION = re.compile(r"^(0|[0-9a-f]{32})$")
+RETIRE_SECONDS = 2 * 3600
 
 
 class SharedLibraryError(ValueError):
@@ -28,10 +31,19 @@ class Conflict(Exception):
     pass
 
 
+class LibraryChanged(SharedLibraryError):
+    pass
+
+
+class SourceNotFound(SharedLibraryError):
+    pass
+
+
 class BlobStore(Protocol):
     def read(self, name: str, limit: int) -> tuple[bytes, str] | None: ...
     def write(self, name: str, data: bytes, expected: str | None) -> str: ...
     def immutable(self, name: str, data: bytes) -> None: ...
+    def delete(self, name: str) -> None: ...
 
 
 class AzureBlobStore:
@@ -82,6 +94,13 @@ class AzureBlobStore:
             current = self.read(name, len(data))
             if current is None or hashlib.sha256(current[0]).digest() != hashlib.sha256(data).digest():
                 raise SharedLibraryError("An existing shared object has an unexpected fingerprint.")
+
+    def delete(self, name):
+        from azure.core.exceptions import ResourceNotFoundError
+        try:
+            self.client.delete_blob(name)
+        except ResourceNotFoundError:
+            pass
 
 
 def parser_profile():
@@ -162,6 +181,8 @@ class SharedLibrary:
                     or item.get("state") not in {"pending", "ready"}
                     or not _SHA.fullmatch(str(item.get("parsed_sha256", "")))):
                 raise SharedLibraryError("Shared catalog contains an invalid entry.")
+            if not _VERSION.fullmatch(str(item.get("object_version", "0"))):
+                raise SharedLibraryError("Shared object version is invalid.")
             if (type(item.get("original_bytes")) is not int or not 0 < item["original_bytes"] <= MAX_ORIGINAL_BYTES
                     or type(item.get("parsed_bytes")) is not int or not 0 < item["parsed_bytes"] <= MAX_PARSED_BYTES):
                 raise SharedLibraryError("Shared catalog size metadata is invalid.")
@@ -175,6 +196,31 @@ class SharedLibrary:
                 raise SharedLibraryError("Shared uploads cannot introduce arbitrary source URLs.")
         if any(type(t) not in (int, float) or not math.isfinite(t) for t in catalog["reservations"]):
             raise SharedLibraryError("Shared quota metadata is invalid.")
+        removals = catalog.get("removals", {})
+        retired = catalog.get("retired", [])
+        if not isinstance(removals, dict) or len(removals) > 2048 or not isinstance(retired, list) or len(retired) > 500:
+            raise SharedLibraryError("Library removal metadata exceeds its limits.")
+        for digest, marker in removals.items():
+            if (not _SHA.fullmatch(digest) or not isinstance(marker, dict)
+                    or not _VERSION.fullmatch(str(marker.get("version", "")))
+                    or not _VERSION.fullmatch(str(marker.get("previous_version", "")))
+                    or type(marker.get("removed")) is not bool or marker.get("kind") not in {"bundled", "shared"}
+                    or type(marker.get("time")) not in (int, float) or not math.isfinite(marker["time"])):
+                raise SharedLibraryError("Library removal metadata is invalid.")
+        retired_keys = set()
+        for item in retired:
+            if (not isinstance(item, dict) or not _SHA.fullmatch(str(item.get("sha256", "")))
+                    or not _SHA.fullmatch(str(item.get("parsed_sha256", "")))
+                    or not _VERSION.fullmatch(str(item.get("object_version", "")))
+                    or type(item.get("original_bytes")) is not int or not 0 < item["original_bytes"] <= MAX_ORIGINAL_BYTES
+                    or type(item.get("parsed_bytes")) is not int or not 0 < item["parsed_bytes"] <= MAX_PARSED_BYTES
+                    or type(item.get("delete_after")) not in (int, float) or not math.isfinite(item["delete_after"])):
+                raise SharedLibraryError("Retired source metadata is invalid.")
+            key = (item["sha256"], item["object_version"])
+            if key in retired_keys:
+                raise SharedLibraryError("Duplicate retired source accounting.")
+            retired_keys.add(key)
+            total += item["original_bytes"] + item["parsed_bytes"]
         if total > MAX_TOTAL_BYTES:
             raise SharedLibraryError("Shared catalog exceeds its byte quota.")
         return catalog, value[1]
@@ -185,15 +231,108 @@ class SharedLibrary:
             raise SharedLibraryError("Shared catalog size limit reached.")
         return self.store.write(CATALOG, data, etag)
 
-    def list(self):
+    @staticmethod
+    def _version(catalog, digest):
+        return catalog.get("removals", {}).get(digest, {}).get("version", "0")
+
+    @staticmethod
+    def _object_paths(item):
+        digest, version = item["sha256"], item.get("object_version", "0")
+        if not _SHA.fullmatch(digest) or not _VERSION.fullmatch(version) or not _SHA.fullmatch(item["parsed_sha256"]):
+            raise SharedLibraryError("Invalid shared object identity.")
+        prefix = f"papers/{digest}/" + (f"{version}/" if version != "0" else "")
+        return prefix + "original.pdf", prefix + item["parsed_sha256"] + ".json"
+
+    def save_version(self, digest):
+        if not _SHA.fullmatch(digest):
+            raise SharedLibraryError("Invalid source identity.")
+        catalog, _ = self._read()
+        return self._version(catalog, digest)
+
+    def visible(self, curated):
         catalog, _ = self._read()
         if any(p["state"] == "ready" and p["parser_profile"] != parser_profile() for p in catalog["papers"].values()):
             raise SharedLibraryError("Shared extraction caches need validation for the current parser version.")
         ready = [copy.deepcopy(p) for p in catalog["papers"].values()
                  if p["state"] == "ready" and p["parser_profile"] == parser_profile()
-                 and p["sha256"] not in self.curated_hashes]
+                 and p["sha256"] not in self.curated_hashes
+                 and not catalog.get("removals", {}).get(p["sha256"], {}).get("removed", False)]
         ready.sort(key=lambda p: (p["created_at"], p["sha256"]))
-        return ready
+        bundled = [copy.deepcopy(p) for p in curated
+                   if not catalog.get("removals", {}).get(p["sha256"], {}).get("removed", False)]
+        return [{**p, "library_version": self._version(catalog, p["sha256"]),
+                 "storage_kind": "bundled" if p["sha256"] in self.curated_hashes else "shared"}
+                for p in bundled + ready]
+
+    def list(self):
+        return self.visible([])
+
+    def assert_selected_current(self, versions):
+        catalog, _ = self._read()
+        for digest, version in versions.items():
+            if (self._version(catalog, digest) != version
+                    or catalog.get("removals", {}).get(digest, {}).get("removed", False)
+                    or (digest not in self.curated_hashes and catalog["papers"].get(digest, {}).get("state") != "ready")):
+                raise LibraryChanged("The library changed. Refresh the paper selection before comparing.")
+
+    def remove(self, digest, expected_version):
+        if not _SHA.fullmatch(digest) or not _VERSION.fullmatch(expected_version):
+            raise SourceNotFound("Paper unavailable.")
+        for _ in range(8):
+            catalog, etag = self._read()
+            marker = catalog.get("removals", {}).get(digest)
+            if marker and marker["removed"]:
+                if marker["previous_version"] != expected_version:
+                    raise LibraryChanged("This paper's library version changed. Refresh before removing it.")
+                return {"removed": True, "already_removed": True, "storage_kind": marker["kind"]}
+            if self._version(catalog, digest) != expected_version:
+                raise LibraryChanged("This paper's library version changed. Refresh before removing it.")
+            kind = "bundled" if digest in self.curated_hashes else "shared"
+            item = catalog["papers"].get(digest)
+            if kind == "shared" and (not item or item["state"] != "ready"):
+                raise SourceNotFound("Paper unavailable.")
+            if "removals" not in catalog:
+                try:
+                    self.store.write("catalog-before-removals-v1.json", json.dumps(catalog, sort_keys=True).encode(), None)
+                except Conflict:
+                    pass
+            if digest not in catalog.get("removals", {}) and len(catalog.get("removals", {})) >= 2048:
+                raise SharedLibraryError("The bounded removal ledger needs operator maintenance.")
+            catalog.setdefault("removals", {})[digest] = {
+                "version": uuid4().hex, "previous_version": expected_version,
+                "removed": True, "kind": kind, "time": time.time(),
+            }
+            if kind == "shared":
+                if len(catalog.get("retired", [])) >= 500:
+                    raise SharedLibraryError("Retired-source cleanup must finish before more papers can be removed.")
+                retired = {key: item[key] for key in ("sha256", "parsed_sha256", "original_bytes", "parsed_bytes")}
+                retired.update(object_version=item.get("object_version", "0"), delete_after=time.time() + RETIRE_SECONDS)
+                catalog.setdefault("retired", []).append(retired)
+                del catalog["papers"][digest]
+            try:
+                self._cas(catalog, etag)
+                return {"removed": True, "already_removed": False, "storage_kind": kind}
+            except Conflict:
+                continue
+        raise SharedLibraryError("The library is busy. Removal was not confirmed; retry.")
+
+    def collect_retired(self):
+        catalog, _ = self._read()
+        expired = [item for item in catalog.get("retired", []) if item["delete_after"] <= time.time()][:5]
+        for item in expired:
+            for path in self._object_paths(item):
+                self.store.delete(path)
+            for _ in range(8):
+                current, etag = self._read()
+                current["retired"] = [p for p in current.get("retired", [])
+                                      if (p["sha256"], p["object_version"]) != (item["sha256"], item["object_version"])]
+                try:
+                    self._cas(current, etag)
+                    break
+                except Conflict:
+                    continue
+            else:
+                raise SharedLibraryError("Retired files were removed, but quota release needs retry.")
 
     def record_save_event(self, receipt: str, state: str, code: str = ""):
         """Bounded operator diagnostics, without visitor identity or document metadata."""
@@ -218,10 +357,25 @@ class SharedLibrary:
                 continue
         raise SharedLibraryError("The save receipt could not be recorded. Retry saving.")
 
-    def save(self, original: bytes, document: dict, title: str):
+    def save(self, original: bytes, document: dict, title: str, *, expected_version=None):
         digest = hashlib.sha256(original).hexdigest()
+        if expected_version is None:
+            expected_version = self.save_version(digest)
         if digest in self.curated_hashes:
-            return {"state": "already-present", "sha256": digest}
+            for _ in range(8):
+                catalog, etag = self._read()
+                if self._version(catalog, digest) != expected_version:
+                    raise LibraryChanged("This paper was removed after the save was requested. Select the file again for a new save.")
+                marker = catalog.get("removals", {}).get(digest)
+                if not marker or not marker["removed"]:
+                    return {"state": "already-present", "sha256": digest}
+                marker["removed"] = False
+                try:
+                    self._cas(catalog, etag)
+                    return {"state": "saved", "sha256": digest}
+                except Conflict:
+                    continue
+            raise SharedLibraryError("The library is busy. Restoration was not confirmed.")
         if not original.startswith(b"%PDF-") or not 0 < len(original) <= MAX_ORIGINAL_BYTES:
             raise SharedLibraryError("Only supported comparison PDFs can be kept in the shared library.")
         document = cache_document(document)
@@ -232,7 +386,7 @@ class SharedLibrary:
         title = title[:255]
         blank_pages = sum(not page["text"].strip() for page in document["pages"])
         item = {
-            "state": "pending", "sha256": digest, "parsed_sha256": parsed_sha,
+            "state": "pending", "sha256": digest, "parsed_sha256": parsed_sha, "object_version": expected_version,
             "original_bytes": len(original), "parsed_bytes": len(parsed), "title": title,
             "created_at": time.time(), "parser_profile": parser_profile(),
             "version": f"Shared upload · {len(document['pages'])} PDF pages"
@@ -245,6 +399,8 @@ class SharedLibrary:
         reserved = None
         for _ in range(8):
             catalog, etag = self._read()
+            if self._version(catalog, digest) != expected_version:
+                raise LibraryChanged("This paper was removed after the save was requested. Select the file again for a new save.")
             existing = catalog["papers"].get(digest)
             if existing:
                 if existing["state"] == "ready":
@@ -258,7 +414,7 @@ class SharedLibrary:
                 raise SharedLibraryError("The shared library's daily new-paper quota is reached.")
             if len(catalog["papers"]) >= MAX_PAPERS:
                 raise SharedLibraryError("The shared library's paper-count limit is reached.")
-            used = sum(p["original_bytes"] + p["parsed_bytes"] for p in catalog["papers"].values())
+            used = sum(p["original_bytes"] + p["parsed_bytes"] for p in list(catalog["papers"].values()) + catalog.get("retired", []))
             if used + len(original) + len(parsed) > MAX_TOTAL_BYTES:
                 raise SharedLibraryError("The shared library's byte quota is reached.")
             catalog["papers"][digest] = item
@@ -273,16 +429,21 @@ class SharedLibrary:
             raise SharedLibraryError("The shared catalog is busy; the save was not completed.")
         # Reservations remain counted on failure. No unaccounted orphan bytes or
         # falsely ready entries; a later identical upload can resume this save.
-        self.store.immutable(f"papers/{digest}/original.pdf", original)
-        self.store.immutable(f"papers/{digest}/{parsed_sha}.json", parsed)
+        original_path, parsed_path = self._object_paths(reserved)
+        self.store.immutable(original_path, original)
+        self.store.immutable(parsed_path, parsed)
         for _ in range(8):
             catalog, etag = self._read()
+            if self._version(catalog, digest) != expected_version:
+                raise LibraryChanged("This paper was removed while saving. Its old save will not restore it.")
             current = catalog["papers"].get(digest)
             if not current or current["parsed_sha256"] != parsed_sha:
                 raise SharedLibraryError("The shared reservation changed; the save was not confirmed.")
             if current["state"] == "ready":
                 return {"state": "already-present", "sha256": digest}
             current["state"] = "ready"
+            if digest in catalog.get("removals", {}):
+                catalog["removals"][digest]["removed"] = False
             try:
                 self._cas(catalog, etag)
                 return {"state": "saved", "sha256": digest}
@@ -294,7 +455,7 @@ class SharedLibrary:
         digest, parsed_sha = paper["sha256"], paper["parsed_sha256"]
         if not _SHA.fullmatch(digest) or not _SHA.fullmatch(parsed_sha) or paper["state"] != "ready":
             raise SharedLibraryError("Invalid shared source selection.")
-        value = self.store.read(f"papers/{digest}/{parsed_sha}.json", MAX_PARSED_BYTES)
+        value = self.store.read(self._object_paths(paper)[1], MAX_PARSED_BYTES)
         if not value or hashlib.sha256(value[0]).hexdigest() != parsed_sha:
             raise SharedLibraryError("The shared source extraction is missing or damaged.")
         path = folder / f"shared-{digest}.json"
