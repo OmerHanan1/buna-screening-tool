@@ -9,6 +9,36 @@ const backend = "https://paper-overlap-api.purpleflower-beedf5ce.eastus.azurecon
 const sitePath = new URL(site).pathname;
 const staticConfig = JSON.parse(await fs.readFile("public/staticwebapp.config.json", "utf8"));
 
+test("saved eligible denominator accounting agrees with the displayed percentage", async ({ page }) => {
+  await page.route(site + "**", async route => route.fulfill(await staticResponse(route.request().url())));
+  await page.route(backend + "/**", async route => {
+    const url = new URL(route.request().url());
+    if (url.pathname.endsWith("/config")) return route.fulfill({ json: { mode: "email-gate" } });
+    if (url.pathname.endsWith("/session")) return route.fulfill({ json: { token: "synthetic-policy-capability" } });
+    if (url.pathname.endsWith("/library")) return route.fulfill({ json: { papers } });
+    if (route.request().method() === "POST") return route.fulfill({ status: 202, json: { id: "policy-fixture", status: "running" } });
+    if (url.pathname.endsWith(".pdf")) return route.fulfill({ contentType: "application/pdf", body: "%PDF-1.7\nSynthetic score-policy fixture" });
+    return route.fulfill({ json: { id: "policy-fixture", status: "complete", checked: 44, total: 44,
+      overlap_percent: 10, score_available: true, score_basis: "eligible-manuscript-word-units",
+      score_policy_version: "eligible-manuscript-v1", algorithm_version: "2.5.4",
+      word_accounting: { total_words: 200, scoped_words: 180, front_matter_words: 20, eligible_words: 140,
+        score_denominator_words: 140, overlapping_words: 14, excluded_bibliography_words: 30,
+        excluded_quotation_words: 10, other_excluded_manuscript_words: 0 } } });
+  });
+  await page.goto(site);
+  await page.getByLabel("Email address").fill("synthetic@example.org");
+  await page.getByRole("button", { name: "Continue", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "44 papers selected" })).toBeVisible();
+  await page.getByLabel("Your paper", { exact: true }).setInputFiles({ name: "synthetic.txt", mimeType: "text/plain", buffer: Buffer.from("Original synthetic manuscript.") });
+  await page.getByRole("checkbox", { name: /authorized to upload/ }).check();
+  await page.getByRole("button", { name: "Compare papers", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Comparison report", exact: true })).toBeVisible();
+  await expect(page.getByText("10%", { exact: true })).toBeVisible();
+  await page.getByText("Report details and evidence", { exact: true }).click();
+  await expect(page.getByText(/14 unique matching words \/ 140 eligible manuscript words after exclusions/)).toBeVisible();
+  await expect(page.getByText(/200 total; 20 front matter excluded; 180 in scope; 30 bibliography, 10 quoted/)).toBeVisible();
+});
+
 test("global removal confirms specific bundled and shared papers with Cancel focused", async ({ page }) => {
   let current = papers.slice(0, 2).map((paper, index) => ({ ...paper, library_version: "0", storage_kind: index ? "shared" : "bundled" }));
   const removed: string[] = [];
