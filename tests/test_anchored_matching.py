@@ -45,6 +45,20 @@ def test_strong_anchor_isolated_substitution_survives():
     assert json.loads(json.dumps(result))["metrics"] == result["metrics"]
 
 
+def test_diagnostic_budget_exhaustion_keeps_partial_report_instead_of_missing_key(monkeypatch):
+    add = improved_eng._Evidence.add
+    def limited(self, size):
+        if size == 2048:
+            raise SearchLimit("evidence-memory-limit", "Synthetic diagnostic budget exhausted.")
+        return add(self, size)
+    monkeypatch.setattr(improved_eng._Evidence, "add", limited)
+    result = compare(PHRASE, PHRASE.replace("emotional", "affective"))
+    assert result["metrics"]["truncated"]
+    assert result["source_coverage"][0]["status"] == "compared-with-limits"
+    assert result["source_coverage"][0]["limits_reached"] == ["evidence-memory-limit"]
+    assert not result["improved_eng"]["similar_diagnostics"]
+
+
 def test_no_content_anchor_despite_many_shared_stopwords():
     m = "we have a result and we have a value and we have a sample"
     s = "we have a finding and we have a value and we have a group"

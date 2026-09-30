@@ -357,9 +357,10 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
                 raise SearchLimit(exc.kind, exc.reason) from exc
             for path, diagnostic in anchored_paths(mw, sw, eligible, s_ok, m_cited, s_cited,
                                                    budget, SearchLimit, working_bytes=WORKING_INDEX_BYTES):
+                if path not in diagnostics:
+                    evidence_budget.add(2048)
                 _collect(scored_paths, path, evidence_budget, budget)
                 if path in scored_paths and path not in diagnostics:
-                    evidence_budget.add(2048)
                     diagnostics[path] = diagnostic
             row["scored_search_complete"] = True
             phase = "audit"
@@ -370,9 +371,10 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
                         mw, sw, [True] * len(mw), [True] * len(sw), m_cited, s_cited,
                         budget, SearchLimit, working_bytes=WORKING_INDEX_BYTES):
                     if not all(eligible[path[0][0]:path[-1][0] + 1]) or not all(s_ok[path[0][1]:path[-1][1] + 1]):
+                        if path not in diagnostics:
+                            evidence_budget.add(2048)
                         _collect(audit_paths, path, evidence_budget, budget)
                         if path in audit_paths and path not in diagnostics:
-                            evidence_budget.add(2048)
                             diagnostics[path] = diagnostic
                 try:
                     for a, e, b, f in _exact_runs(mw, [True] * len(mw), [0] * len(mw), sw, [True] * len(sw),
