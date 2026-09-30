@@ -117,6 +117,7 @@ do not leave a warm validation replica running.
    Use `pip download --require-hashes -r deploy/requirements-linux.lock
    --only-binary=:all: --platform manylinux2014_x86_64 --python-version 313
    --implementation cp --abi cp313 --dest release-context/wheels`.
+   Include `--platform manylinux_2_28_x86_64` for the pinned PyMuPDF 1.28.2 wheel.
 3. Build `deploy/Dockerfile` for linux/amd64 and pin the resulting image digest.
 4. Provision the dedicated registry/environment/application; configure budget alerts.
 5. Run `python deploy/smoke_public.py` inside the private app to validate ownership,
@@ -162,6 +163,15 @@ Pass the deployment token privately through `SWA_CLI_DEPLOYMENT_TOKEN`, obtained
 from the same explicitly scoped SWA resource. Never print it, place it in source,
 pass it as a command-line argument, or use a `VITE_*` variable for any secret.
 No GitHub workflow permission or Microsoft sign-in callback change is required.
+
+PDF renderer 7 pins PyMuPDF 1.28.2: the previous 1.26.0 typesetter could omit
+source-table rows after two pages even when every source had been compared.
+Source keys now use bounded table groups with repeated headers and a structured
+row-open/row-close invariant. Missing or duplicated layout rows fail PDF
+publication explicitly; saved evidence JSON and comparison scores are unchanged.
+`PYTHONPATH=/app python /app/deploy/verify_pdf_sources.py` checks 57/94/144 rows,
+long titles, zero/partial/unavailable statuses and manuscript annotation offsets
+inside the production image. Existing downloaded PDFs do not update themselves.
 
 ### Origin cutover and rollback
 

@@ -21,7 +21,7 @@ import pymupdf as fitz
 from buna.result_state import result_state
 from buna.reports import _THEME
 
-PDF_RENDERER_VERSION = "6"
+PDF_RENDERER_VERSION = "7"
 _LOCK = threading.Lock()
 def _theme(name: str) -> str:
     match = re.search(rf"--cp-{re.escape(name)}:\s*(#[0-9a-fA-F]{{6}})", _THEME)
@@ -276,7 +276,14 @@ def _typeset(body: str) -> fitz.Document:
     .muted { color: MUTED; } .warn { border-left: 2pt solid ACCENT; padding-left: 8pt; }
     """.replace("TEXT", _theme("text")).replace("BORDER", _theme("border")).replace("MUTED", _theme("text-muted")).replace("ACCENT", _theme("accent"))
     story = fitz.Story(html=body, user_css=css)
-    return story.write_with_links(lambda rect_num, filled: (fitz.Rect(0, 0, 595, 842), fitz.Rect(36, 36, 559, 806), None))
+    row_positions = []
+    def position(element):
+        if element.id and element.id.startswith("source-row-"):
+            row_positions.append((element.id.removeprefix("source-row-"), element.open_close))
+    document = story.write_with_links(lambda rect_num, filled: (fitz.Rect(0, 0, 595, 842), fitz.Rect(36, 36, 559, 806), None),
+                                      positionfn=position)
+    document._source_row_positions = row_positions
+    return document
 
 
 def _percent(value: object) -> str:
@@ -311,11 +318,28 @@ def _summary_table(report: dict, numbers: dict[str, int], names: dict[str, str])
         overlap = _percent(value) if checked and outcome["score_available"] else "Not assessed"
         if checked and outcome["score_available"] and value is None:
             overlap = "Not recorded"
-        rows.append(f"<tr><td>{html.escape(str(numbers[sid]))}</td><td>{html.escape(names[sid])}</td>"
+        reason = result.get("reason")
+        if not checked and isinstance(reason, str) and reason:
+            label += " · " + reason
+        rows.append(f"<tr id='source-row-{html.escape(str(numbers[sid]))}'><td>#{html.escape(str(numbers[sid]))}</td><td>{html.escape(names[sid])}</td>"
                     f"<td>{overlap}</td><td>{html.escape(label)}</td></tr>")
-    return ("<h2>Overlap summary / Source key</h2><table>"
-            "<tr><th>No.</th><th>Paper</th><th>Overlap</th><th>Status</th></tr>"
-            + "".join(rows) + "</table>")
+    header = "<tr><th>No.</th><th>Paper</th><th>Overlap</th><th>Status</th></tr>"
+    tables = ["<table>" + header + "".join(rows[start:start + 12]) + "</table>"
+              for start in range(0, len(rows), 12)]
+    fully_checked = sum((source_results.get(str(p["id"]), {}).get("status") or p.get("comparison_status")
+                         or ("compared-with-limits" if p.get("partial_comparison") else p.get("status"))) == "compared"
+                        for p in report.get("papers", []))
+    return (f"<h2>Overlap summary / Source key</h2><p>{fully_checked} of {len(report.get('papers', []))} selected papers fully checked."
+            " Every selected paper is listed below, including zero overlap and unexamined sources.</p>" + "".join(tables))
+
+
+def _verify_summary_sources(summary: fitz.Document, numbers: dict[str, int]) -> None:
+    expected = Counter(str(number) for number in numbers.values())
+    positions = getattr(summary, "_source_row_positions", [])
+    opened = Counter(number for number, event in positions if event & 1)
+    closed = Counter(number for number, event in positions if event & 2)
+    if opened != expected or closed != expected:
+        raise PdfReportError("PDF source-key rendering is incomplete or duplicated; the report was not published. Saved comparison evidence is unchanged.")
 
 
 def generate_pdf(payload: dict, destination: Path) -> dict:
@@ -477,6 +501,12 @@ def generate_pdf(payload: dict, destination: Path) -> dict:
     if omitted_labels:
         body += f"<p class='muted'>{omitted_labels} lines had no unobstructed margin for a number. Their PDF highlight notes still identify the papers.</p>"
     summary = _typeset(body)
+    try:
+        _verify_summary_sources(summary, numbers)
+    except PdfReportError:
+        summary.close()
+        manuscript.close()
+        raise
     if classified:
         for phrase, color, opacity in (("E · Exact overlap", "accent", .18), ("S · Similar wording", "warning", .24)):
             for page in summary:
