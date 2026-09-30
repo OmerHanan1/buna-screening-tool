@@ -7,6 +7,14 @@ and matching excerpts. Saved papers are available as comparison sources to
 everyone with app access—including anyone who knows an allowed email, because
 the email gate does not verify identity.
 
+**Checking the box starts saving immediately. No manuscript or comparison is
+required.** The file is uploaded, queued for the isolated parser, validated and
+committed to private Blob storage and the catalog. The UI says **Saved to shared
+library** only after the durable acknowledgement and an authoritative library
+refresh confirm visibility. The source is then searchable in Review papers.
+Unchecked files are not shared. Removing or unchecking an already saved upload
+only affects the current workspace; it never deletes the shared source.
+
 Manuscripts, reports and unselected comparison uploads remain temporary. Opted-in
 sources persist privately across sessions, restarts and scale-down. There is no
 original-source/full-text download route or public shared-library deletion API.
@@ -18,7 +26,11 @@ Only a complete file accepted by the isolated PDF parser is eligible. Empty,
 unreadable/scanned-only, identifiable abstract-only or inconsistent/truncated
 extractions are rejected. Heading-less documents cannot be semantically proven
 to contain a whole scientific article; extraction warnings and page limitations
-remain visible. Exact manuscript-byte and normalized-text copies are not saved.
+remain visible. The browser rejects a byte-identical copy of its currently
+selected manuscript. Standalone source saving has no manuscript to compare
+against; it cannot determine whether an explicitly selected comparison PDF is
+actually someone's manuscript. Legacy comparison-bound requests also reject
+byte-identical and normalized-text-identical manuscript copies.
 
 The original SHA256 is the source identity. Original PDF and canonical parsed
 cache are immutable blobs. An identical upload returns “Already in the library”;
@@ -26,7 +38,9 @@ its title/version is not replaced. Curated sources remain in the separate,
 immutable 44-file image and cannot be overwritten by shared uploads. No automatic
 DOI merge is performed.
 
-Successful saves affect **future comparison snapshots only**. The current job's
+Successful saves refresh the setup library without resetting existing opt-outs.
+Already saved manual files are selected by their immutable ID, not uploaded or
+counted twice. Saves affect **future comparison snapshots only**. The current job's
 selected files, existing deselections, source IDs and reports do not change.
 Starting a new comparison refreshes the library, keeps deselections for existing
 members, and selects newly ready members. Another visitor gets the same durable
@@ -61,10 +75,28 @@ reservations or change immutable versions. There is no silent unbounded cleanup.
 
 ## Failure and cancellation behavior
 
+Saving uses the same single resource slot as comparison; up to five source saves
+can wait without launching competing parsers. Source parsing has a 35-second
+timer, 40 CPU seconds (45 hard), 45-second supervisor deadline and 96 MiB temporary
+file bound, with the same UID/seccomp/address-space isolation. Admission/retries
+are bounded to 20 per rolling day per replica, with at most three attempts per
+receipt. Persistent catalog quotas still apply across replicas/restarts.
+
 The comparison report becomes available independently of durable saving.
 “Saving”, “Saved”, “Already in the library”, “Not saved” and failure reasons are
-shown separately. A failed/uncertain save never displays success. **Retry library
-save** retries persistence only; it does not rerun the comparison.
+shown per file with a random save reference. A failed/uncertain save never displays
+success. **Retry save** retries only source validation/storage, never comparison.
+The older **Retry library save** action remains supported for old comparison-bound
+requests; it retries their storage only. The new UI no longer submits those flags.
+
+Pending uploads and owner-scoped retry receipts expire after one hour and may be
+lost on restart; only acknowledged saved papers are durable. The UI warns before
+leaving with pending or failed saves. After a lost receipt, check the library and
+explicitly retry with the original file if it is absent. Operators can inspect
+up to 100 seven-day durable diagnostic entries in the catalog, containing only
+random save ID, timestamp, state and coarse error code—no email, capability,
+filename or document text. Historical failures predating these receipts cannot
+be reconstructed once their temporary job records expire.
 
 Cancellation and entry into publication use the same lifecycle lock. If
 cancellation wins, pending sharing is cancelled. If comparison has already

@@ -102,6 +102,27 @@ def test_unchecked_and_manuscript_copy_are_not_shared(tmp_path, monkeypatch):
         assert not blobs.values
 
 
+@pytest.mark.parametrize("validation,expected", [
+    ({}, "ended before this source was validated"),
+    ({"1": {"validated": False, "reason": "This source is identical to your manuscript and was not shared."}}, "identical to your manuscript"),
+])
+def test_legacy_save_rejection_retains_actionable_reason(tmp_path, monkeypatch, validation, expected):
+    setup(monkeypatch)
+    root, _ = corpus(tmp_path)
+    blobs = MemoryBlobs()
+    def rejecting_worker(folder, uid):
+        (folder / "share-validation.json").write_text(json.dumps(validation))
+        worker(folder, uid)
+    with TestClient(create_public_app(root, tmp_path, worker_runner=rejecting_worker, shared_store=blobs)) as c:
+        headers = session(c)
+        response = c.post("/api/public/jobs", headers=headers,
+                          data={"selected": "[]", "save_sources": "[0]", "share_authorized": "true"},
+                          files=[("target", ("manuscript.pdf", TARGET)), ("sources", ("source.pdf", SOURCE))])
+        state = finish(c, response.json()["id"], headers)
+        assert expected in state["library_saves"][0]["reason"]
+        assert not blobs.values
+
+
 def test_save_outage_does_not_hide_pdf_and_retry_does_not_recompare(tmp_path, monkeypatch):
     setup(monkeypatch)
     root, _ = corpus(tmp_path)

@@ -4,6 +4,8 @@ import hashlib
 import json
 import os
 import time
+import tempfile
+from pathlib import Path
 from uuid import uuid4
 
 import httpx
@@ -73,9 +75,63 @@ def verify(base, digest=None):
                 "fully_checked": 1, "private_job_deleted": True, "shared_source_retained": True}
 
 
+def verify_immediate(base, digest=None):
+    """Save a 45-page original fixture without a manuscript or comparison POST."""
+    from benchmark_hosted import manuscript
+    with httpx.Client(base_url=base, timeout=90) as client:
+        response = client.post("/api/public/session", json={"email": os.environ["BUNA_TEST_EMAIL"]})
+        response.raise_for_status()
+        headers = {"Authorization": "Bearer " + response.json()["token"]}
+        library = client.get("/api/public/library", headers=headers).json()
+        assert library["immediate_shared_saving"] and library["shared_saving_available"]
+        receipt = None
+        if digest is None:
+            title = "Synthetic immediate persistence probe " + str(uuid4()) + ".pdf"
+            with tempfile.TemporaryDirectory() as folder:
+                path = Path(folder) / "source.pdf"
+                manuscript(path, pages=45)
+                source = path.read_bytes()
+            digest = hashlib.sha256(source).hexdigest()
+            response = client.post("/api/public/source-saves",
+                                   headers={**headers, "Idempotency-Key": str(uuid4())},
+                                   data={"share_authorized": "true"},
+                                   files={"source": (title, source, "application/pdf")})
+            response.raise_for_status()
+            receipt = response.json()["id"]
+            for _ in range(180):
+                response = client.get("/api/public/source-saves/" + receipt, headers=headers)
+                response.raise_for_status()
+                state = response.json()
+                if state["state"] in {"saved", "already-present", "failed", "cancelled"}:
+                    break
+                time.sleep(1)
+            assert state["state"] in {"saved", "already-present"}, state
+        papers = client.get("/api/public/library", headers=headers).json()["papers"]
+        paper = next(p for p in papers if p["sha256"] == digest)
+        assert paper["title"].startswith("Synthetic immediate persistence probe ")
+        assert "45 PDF pages" in paper["version"]
+        target = pdf("Abstract\nWe examined whether the effects of psychological distance on emotion depended on the task context and the order of presentation.")
+        response = client.post("/api/public/jobs", headers=headers,
+                               data={"selected": json.dumps([digest])},
+                               files={"target": ("original-synthetic-target.pdf", target, "application/pdf")})
+        response.raise_for_status()
+        path = "/api/public/jobs/" + response.json()["id"]
+        state = wait(client, path, headers)
+        assert state["status"] == "complete" and state["checked"] == 1 and state["overlap_percent"] > 0, state
+        report = client.get(path + "/report.pdf", headers=headers)
+        report.raise_for_status()
+        assert report.content.startswith(b"%PDF-")
+        client.delete(path, headers=headers).raise_for_status()
+        return {"sha256": digest, "title": paper["title"], "source_pages": 45, "save_receipt": receipt,
+                "source_saved_without_manuscript_or_comparison": receipt is not None,
+                "library_visible": True, "ready_sources": len(papers), "pdf_bytes": len(report.content),
+                "saved_source_only_fully_checked": 1, "private_job_deleted": True}
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base", default="http://127.0.0.1:8080")
     parser.add_argument("--existing-sha")
+    parser.add_argument("--immediate", action="store_true")
     args = parser.parse_args()
-    print(json.dumps(verify(args.base, args.existing_sha)))
+    print(json.dumps((verify_immediate if args.immediate else verify)(args.base, args.existing_sha)))

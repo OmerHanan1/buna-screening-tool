@@ -195,6 +195,29 @@ class SharedLibrary:
         ready.sort(key=lambda p: (p["created_at"], p["sha256"]))
         return ready
 
+    def record_save_event(self, receipt: str, state: str, code: str = ""):
+        """Bounded operator diagnostics, without visitor identity or document metadata."""
+        if not re.fullmatch(r"[0-9a-f-]{36}", receipt) or state not in {
+            "queued", "validating", "saving", "saved", "already-present", "failed", "cancelled"
+        } or not re.fullmatch(r"[a-z-]{0,64}", code):
+            raise SharedLibraryError("Invalid save receipt metadata.")
+        for _ in range(8):
+            catalog, etag = self._read()
+            events = catalog.get("save_events", [])
+            if not isinstance(events, list):
+                raise SharedLibraryError("Shared save diagnostics are invalid.")
+            events = [event for event in events if isinstance(event, dict)
+                      and isinstance(event.get("time"), (int, float))
+                      and event["time"] >= time.time() - 7 * 86400 and event.get("id") != receipt][-99:]
+            events.append({"id": receipt, "time": time.time(), "state": state, "code": code})
+            catalog["save_events"] = events
+            try:
+                self._cas(catalog, etag)
+                return
+            except Conflict:
+                continue
+        raise SharedLibraryError("The save receipt could not be recorded. Retry saving.")
+
     def save(self, original: bytes, document: dict, title: str):
         digest = hashlib.sha256(original).hexdigest()
         if digest in self.curated_hashes:

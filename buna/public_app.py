@@ -71,7 +71,7 @@ class PublicBodyLimit:
 
 
 def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None = None,
-                      *, worker_runner=None, team_authenticator=None, shared_store=None) -> FastAPI:
+                      *, worker_runner=None, team_authenticator=None, shared_store=None, source_runner=None) -> FastAPI:
     corpus_root = (corpus_root or Path(os.environ["BUNA_PUBLIC_CORPUS"])).resolve()
     access_mode = os.environ.get("BUNA_ACCESS_MODE", "")
     if access_mode not in {"", "anonymous", "team", "email-gate"}:
@@ -154,6 +154,7 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
     os.chmod(index, 0o600)
 
     def cleanup():
+        cleanup_source_saves()
         with lock, connect() as db:
             rows = db.execute("SELECT id FROM jobs WHERE created<?", (time.time() - RETENTION,)).fetchall()
             for row in rows:
@@ -318,7 +319,12 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
         snapshot, warning = library_snapshot()
         return {"papers": [{k: p[k] for k in ("sha256", "title", "attribution", "license", "license_url", "source_url", "version")} for p in snapshot],
                 "retention_seconds": RETENTION, "shared_saving_available": shared is not None and not warning,
-                "shared_library_warning": warning}
+                "shared_library_warning": warning, "immediate_shared_saving": shared is not None}
+
+    from buna.public_source_saves import install_source_saves
+    cleanup_source_saves = install_source_saves(
+        app, shared=shared, root=root, connect=connect, session=session, lock=lock,
+        gate=gate, active=active, stopping=stopping, runner=source_runner)
 
     def persist_shared(job_id):
         with connect() as db:
@@ -338,8 +344,11 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
                 continue
             if job is None or job["status"] == "cancelled":
                 entry.update(state="cancelled", reason="The comparison was cancelled; this paper was not saved.")
-            elif not isinstance(validations.get(entry["source_id"]), dict) or validations[entry["source_id"]].get("validated") is not True:
-                entry.update(state="rejected", reason="The source did not pass full-text/shared-save validation. It was not added to the shared library.")
+            elif not isinstance(validations.get(entry["source_id"]), dict):
+                entry.update(state="rejected", reason="The comparison ended before this source was validated for sharing. It was not saved; use the independent save checkbox to try again.")
+            elif validations[entry["source_id"]].get("validated") is not True:
+                reason = validations[entry["source_id"]].get("reason")
+                entry.update(state="rejected", reason=reason if isinstance(reason, str) and 0 < len(reason) <= 1000 else "The source did not pass shared-save validation and was not saved.")
             else:
                 entry.update(state="saving", reason="")
                 with connect() as db:
