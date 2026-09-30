@@ -25,7 +25,7 @@ DAILY_PARSE_SECONDS = 2250
 
 
 def install_source_saves(app, *, shared, root, connect, session, lock, gate, active,
-                         stopping, runner=None):
+                         stopping, runner=None, curated_papers=()):
     parent = root / "source-saves"
     parent.mkdir(mode=0o711)
     with connect() as db:
@@ -33,6 +33,7 @@ def install_source_saves(app, *, shared, root, connect, session, lock, gate, act
             id TEXT PRIMARY KEY,owner TEXT NOT NULL,created REAL NOT NULL,
             state TEXT NOT NULL,reason TEXT NOT NULL,digest TEXT NOT NULL,
             title TEXT NOT NULL,uid INTEGER NOT NULL,request_key TEXT NOT NULL,attempts INTEGER NOT NULL DEFAULT 1,
+            library_version TEXT NOT NULL DEFAULT '0',
             UNIQUE(owner,request_key))""")
         db.execute("CREATE TABLE source_save_admissions(created REAL NOT NULL)")
         db.execute("CREATE TABLE source_parse_budget(id TEXT PRIMARY KEY,created REAL NOT NULL,seconds REAL NOT NULL)")
@@ -92,7 +93,12 @@ def install_source_saves(app, *, shared, root, connect, session, lock, gate, act
                     return
                 db.execute("UPDATE source_saves SET state='validating' WHERE id=?", (receipt,))
             event(receipt, "validating")
-            if row["digest"] in shared.curated_hashes or any(p["sha256"] == row["digest"] for p in shared.list()):
+            if shared.save_version(row["digest"]) != row["library_version"]:
+                raise SharedLibraryError("This paper was removed after this save was requested. Select the file again to request a new save.")
+            present = next((p for p in shared.visible(curated_papers) if p["sha256"] == row["digest"]), None)
+            if present and present["library_version"] != row["library_version"]:
+                raise SharedLibraryError("This paper's library version changed after this save was requested. Select the file again for a new save.")
+            if present:
                 state, reason, code = "already-present", "", ""
                 event(receipt, state)
                 return
@@ -150,7 +156,7 @@ def install_source_saves(app, *, shared, root, connect, session, lock, gate, act
                     return
                 db.execute("UPDATE source_saves SET state='saving' WHERE id=?", (receipt,))
             event(receipt, "saving")
-            result = shared.save(original, document, row["title"])
+            result = shared.save(original, document, row["title"], expected_version=row["library_version"])
             state, reason, code = result["state"], "", ""
             # "Saved" reaches the browser only after both durable commits succeeded.
             event(receipt, state)
@@ -227,7 +233,7 @@ def install_source_saves(app, *, shared, root, connect, session, lock, gate, act
             if uid >= 60000:
                 raise HTTPException(503, "Service identity capacity exhausted.")
             receipt = str(uuid4())
-            db.execute("INSERT INTO source_saves VALUES(?,?,?,'receiving','','','',?,?,1)",
+            db.execute("INSERT INTO source_saves VALUES(?,?,?,'receiving','','','',?,?,1,'0')",
                        (receipt, owner, time.time(), uid, key))
             db.execute("INSERT INTO source_save_admissions VALUES(?)", (time.time(),))
         folder = parent / receipt
@@ -255,9 +261,10 @@ def install_source_saves(app, *, shared, root, connect, session, lock, gate, act
                 if not total or signature != b"%PDF-":
                     raise HTTPException(422, "A nonempty PDF is required.")
                 await run_in_threadpool(event, receipt, "queued")
+                version = await run_in_threadpool(shared.save_version, digest.hexdigest())
                 with lock, connect() as db:
-                    db.execute("UPDATE source_saves SET state='queued',digest=?,title=? WHERE id=?",
-                               (digest.hexdigest(), Path(source.filename).name[:255], receipt))
+                    db.execute("UPDATE source_saves SET state='queued',digest=?,title=?,library_version=? WHERE id=?",
+                               (digest.hexdigest(), Path(source.filename).name[:255], version, receipt))
             start(receipt)
             return public(owned(receipt, owner))
         except Exception as exc:

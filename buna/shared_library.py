@@ -359,7 +359,7 @@ class SharedLibrary:
 
     def capacity(self):
         catalog, _ = self._read()
-        used = sum(p["original_bytes"] + p["parsed_bytes"] for p in catalog["papers"].values())
+        used = sum(p["original_bytes"] + p["parsed_bytes"] for p in list(catalog["papers"].values()) + catalog.get("retired", []))
         daily = sum(t >= time.time() - 86400 for t in catalog["reservations"])
         return {"paper_limit": MAX_PAPERS, "papers_remaining": MAX_PAPERS - len(catalog["papers"]),
                 "daily_limit": MAX_NEW_PER_DAY, "daily_remaining": max(0, MAX_NEW_PER_DAY - daily),

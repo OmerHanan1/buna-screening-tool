@@ -29,6 +29,7 @@ export default function PublicApp() {
   const libraryRef = useRef<HostedPaper[]>([]);
   const libraryRequest = useRef(0);
   const [sharedAvailable, setSharedAvailable] = useState(false);
+  const [removalAvailable, setRemovalAvailable] = useState(false);
   const [sharedCapacity, setSharedCapacity] = useState<{ paper_limit: number; papers_remaining: number; daily_limit: number; daily_remaining: number; bytes_remaining: number } | null>(null);
   const [libraryWarning, setLibraryWarning] = useState("");
   const [saveRetrying, setSaveRetrying] = useState(false);
@@ -86,13 +87,28 @@ export default function PublicApp() {
       if (!response.ok) throw new Error("The comparison library could not be loaded. Please retry.");
       const data = await response.json();
       if (sequence !== libraryRequest.current) return libraryRef.current;
+      if (data.shared_library_warning) {
+        setSharedAvailable(false); setRemovalAvailable(false);
+        setLibraryWarning(data.shared_library_warning);
+        throw new Error(data.shared_library_warning);
+      }
       const previous = new Set(libraryRef.current.map(paper => paper.sha256));
       libraryRef.current = data.papers;
       setPapers(data.papers);
       setSelected(current => data.papers.filter((paper: HostedPaper) => !preserveSelection || !previous.has(paper.sha256) || current.includes(paper.sha256)).map((paper: HostedPaper) => paper.sha256));
       setSharedAvailable(data.shared_saving_available === true && data.immediate_shared_saving === true);
       setSharedCapacity(data.shared_capacity || null);
+      setRemovalAvailable(data.library_removal_available === true);
       setLibraryWarning(data.shared_library_warning || "");
+      if (data.library_removal_available) {
+        const available = new Set((data.papers as HostedPaper[]).map(paper => paper.sha256));
+        for (const [file, save] of sourceSavesRef.current) {
+          if (saveReady(save) && save.digest && !available.has(save.digest)) {
+            updateSourceSave(file, { ...save, id: undefined, key: crypto.randomUUID(), state: "removed" });
+            setKeepSources(previous => { const next = new Set(previous); next.delete(file); return next; });
+          }
+        }
+      }
       return data.papers as HostedPaper[];
     } catch (e) { if (sequence === libraryRequest.current) setError(e instanceof Error ? e.message : "The service could not be reached. Retry shortly."); }
     finally { if (sequence === libraryRequest.current) setLoadingLibrary(false); }
@@ -353,7 +369,10 @@ export default function PublicApp() {
       const current = created.status === "running" ? created : await (await request(`/jobs/${created.id}`)).json();
       if (created.source_count !== undefined) setSubmitted(previous => ({ ...previous, count: created.source_count }));
       setStartedAt(Date.now()); setJob(current);
-    } catch (e) { setError((e as Error).message); }
+    } catch (e) {
+      if (e instanceof RequestError && e.status === 409) await loadLibrary(true);
+      setError((e as Error).message);
+    }
     finally { setBusy(false); }
   }
   async function reportFile(format: "json") {
@@ -371,6 +390,30 @@ export default function PublicApp() {
     const url = URL.createObjectURL(new Blob([JSON.stringify({ papers }, null, 2)], { type: "application/json" }));
     urls.current.push(url);
     const link = document.createElement("a"); link.href = url; link.download = "source-attributions.json"; link.click();
+  }
+  async function removeLibraryPaper(paper: HostedPaper) {
+    if (busy || pendingSourceSaves || [...uploadsRef.current.values()].some(upload => ["waiting", "uploading"].includes(upload.state))) {
+      throw new Error("Finish or cancel pending uploads and saves before changing the shared library. Existing running comparisons need not be cancelled.");
+    }
+    await request(`/library/${paper.sha256}`, { method: "DELETE", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ confirm_sha256: paper.sha256, expected_version: paper.library_version, affects_everyone: true }) });
+    setSelected(previous => previous.filter(id => id !== paper.sha256));
+    for (const file of sourcesRef.current) {
+      const saved = sourceSavesRef.current.get(file);
+      if (saved?.digest !== paper.sha256 || !saveReady(saved)) continue;
+      const upload = uploadsRef.current.get(file);
+      if (upload?.id) {
+        try { await request(`/source-uploads/${upload.id}`, { method: "DELETE" }); }
+        catch (e) { if (!(e instanceof RequestError) || e.status !== 404) throw new Error("Library removal succeeded, but clearing the private draft upload failed. Retry to finish refreshing this workspace."); }
+      }
+      if (upload) updateUpload(file, { ...upload, state: "cancelled" });
+      updateSourceSave(file, { key: crypto.randomUUID(), state: "cancelled", reason: "Removed from the shared library." });
+      sourcesRef.current = sourcesRef.current.filter(item => item !== file);
+      setKeepSources(previous => { const next = new Set(previous); next.delete(file); return next; });
+    }
+    setSources(sourcesRef.current);
+    const refreshed = await loadLibrary(true);
+    if (!refreshed) throw new Error("Removal was committed, but the library refresh failed. Retry to confirm its current contents.");
   }
   async function remove() {
     if (!job) return;
@@ -410,7 +453,7 @@ export default function PublicApp() {
   const comparisonCount = new Set([...selected, ...sources.flatMap(file => {
     const saved = sourceSaves.get(file); return saveReady(saved) && saved?.digest ? [saved.digest] : [];
   }), ...sources.flatMap(file => uploads.get(file)?.digest ? [uploads.get(file)!.digest!] : [])]).size;
-  const disabledReason = pendingSourceSaves ? "Saving selected papers first. No comparison is needed to save them." : loadingLibrary ? "Loading comparison papers…" : !target ? "Add your manuscript to begin." : !selected.length && !sources.length ? "Select at least one comparison paper."
+  const disabledReason = libraryWarning ? "Reconnect to the library before comparing." : pendingSourceSaves ? "Saving selected papers first. No comparison is needed to save them." : loadingLibrary ? "Loading comparison papers…" : !target ? "Add your manuscript to begin." : !selected.length && !sources.length ? "Select at least one comparison paper."
     : [...keepSources].some(file => sourceSaves.get(file)?.state === "failed") ? "Retry failed saves, or uncheck Keep to compare without saving those papers."
     : sources.some(file => uploads.get(file)?.state === "failed") ? "Retry or remove each failed comparison upload before comparing."
     : sources.some(file => uploads.get(file)?.state !== "ready") ? "Uploading comparison papers one at a time. Wait until every selected file is ready."
@@ -439,7 +482,7 @@ export default function PublicApp() {
           <p>{job?.status === "complete" ? "Review the annotated manuscript and matching source passages." : "Upload your manuscript. Get an annotated PDF of matching passages."}</p></div>
         {error && <p role="alert" className="hosted-error">{error}</p>}
         {loadingLibrary && <p role="status" className="hosted-loading"><LoaderCircle className="hosted-spin" size={15} />Loading comparison papers…</p>}
-        {!loadingLibrary && papers.length === 0 && <button onClick={() => loadLibrary()}>Retry library connection</button>}
+        {!loadingLibrary && (papers.length === 0 || libraryWarning) && <button onClick={() => loadLibrary(true)}>Refresh library</button>}
         {libraryWarning && <p role="alert" className="hosted-critical">{libraryWarning}</p>}
         {!job && <>
           <fieldset disabled={busy} className="hosted-surface hosted-form">
@@ -469,6 +512,7 @@ export default function PublicApp() {
                   {saveReady(sourceSaves.get(file)) ? <><strong>{sourceSaves.get(file)?.state === "already-present" ? "Already in shared library." : "Saved to shared library."}</strong> Listed as “{papers.find(paper => paper.sha256 === sourceSaves.get(file)?.digest)?.title}” in Review papers. Removing or unchecking here does not delete the saved paper.</>
                     : sourceSaves.get(file)?.state === "failed" ? <><strong>Not confirmed saved.</strong> {sourceSaves.get(file)?.reason} <button onClick={() => void beginSourceSave(file)}>Retry save</button></>
                     : sourceSaves.get(file)?.state === "cancelled" ? "Save cancelled. The file was not added by this request."
+                    : sourceSaves.get(file)?.state === "removed" ? "No longer in the shared library. Your private upload remains available for this comparison; check Keep again only to share it anew."
                     : ["waiting", "queued"].includes(sourceSaves.get(file)?.state || "") ? "Saving queued — waiting for the current parser/comparison to finish."
                     : "Saving… validating the PDF and confirming permanent library storage."}
                   {sourceSaves.get(file)?.id && <small> Save reference: {sourceSaves.get(file)?.id}</small>}
@@ -522,9 +566,11 @@ export default function PublicApp() {
         </section>}
         <details className="hosted-info"><summary>Privacy, access and source credits</summary><p>Files are processed on Azure, not sent to external AI or discovery providers. This page’s random access token stays in memory. Refreshing or leaving loses access. Manuscripts, reports and unsaved comparison files expire within one hour and may disappear sooner after restart. Comparison PDFs explicitly kept in the shared library persist for future visitors; the manuscript is never saved by that option.</p><p>Email ownership is not verified; anyone knowing an allowed email can enter and use shared papers for comparisons. Separate visitor tokens protect each visitor’s jobs. Do not upload confidential or sensitive manuscripts.</p><p>Manuscripts: 10 MiB, 250 pages, 250,000 extracted characters. Up to 50 added papers, 8 MiB each, 128 MiB per batch, uploaded individually within the 32 MiB request limit. Pages and extractability are checked during comparison. Resource limits can produce partial results, with every selected source accounted for.</p><button onClick={() => setReviewing(true)}>Review source credits</button><button onClick={credits}>Download source credits</button></details>
         <p className="hosted-info">Temporary workspace · Download your report before leaving.</p>
+        {removalAvailable && <details className="hosted-info"><summary>Removing library papers</summary><p>Deselecting affects only this comparison. Remove from library requires confirmation and affects every app user. Existing reports and admitted comparisons are unchanged. Bundled files remain packaged privately; removed uploaded files enter delayed private cleanup.</p></details>}
       </>}
     </main>
     <footer className="hosted-footer"><span>For research review. Not affiliated with Crossref or Turnitin.</span><a href="https://github.com/OmerHanan1/buna-screening-tool" target="_blank" rel="noreferrer">Source code · AGPL</a></footer>
-    {reviewing && <PaperDialog papers={papers} selected={selected} onSelect={setSelected} onClose={() => setReviewing(false)} readOnly={busy || job !== null} />}
+    {reviewing && <PaperDialog papers={papers} selected={selected} onSelect={setSelected} onClose={() => setReviewing(false)} readOnly={busy || job !== null}
+      onRemove={removalAvailable ? removeLibraryPaper : undefined} />}
   </div>;
 }

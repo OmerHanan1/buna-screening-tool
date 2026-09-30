@@ -9,6 +9,65 @@ const backend = "https://paper-overlap-api.purpleflower-beedf5ce.eastus.azurecon
 const sitePath = new URL(site).pathname;
 const staticConfig = JSON.parse(await fs.readFile("public/staticwebapp.config.json", "utf8"));
 
+test("global removal confirms specific bundled and shared papers with Cancel focused", async ({ page }) => {
+  let current = papers.slice(0, 2).map((paper, index) => ({ ...paper, library_version: "0", storage_kind: index ? "shared" : "bundled" }));
+  const removed: string[] = [];
+  await page.route(site + "**", async route => route.fulfill(await staticResponse(route.request().url())));
+  await page.route(backend + "/**", async route => {
+    const url = new URL(route.request().url());
+    if (url.pathname.endsWith("/config")) return route.fulfill({ json: { mode: "email-gate" } });
+    if (url.pathname.endsWith("/session")) return route.fulfill({ json: { token: "synthetic-removal-capability" } });
+    if (url.pathname.endsWith("/library")) return route.fulfill({ json: { papers: current, library_removal_available: true, shared_saving_available: true, immediate_shared_saving: true } });
+    if (route.request().method() === "DELETE" && url.pathname.includes("/library/")) {
+      const id = url.pathname.split("/").at(-1)!;
+      expect(route.request().postDataJSON()).toEqual({ confirm_sha256: id, expected_version: "0", affects_everyone: true });
+      expect(route.request().headers().authorization).toContain("synthetic-removal-capability");
+      removed.push(id);
+      current = current.filter(paper => paper.sha256 !== id);
+      return route.fulfill({ json: { removed: true, scope: "all-users" } });
+    }
+    return route.fulfill({ status: 404 });
+  });
+  await page.goto(site);
+  await page.getByLabel("Email address").fill("synthetic@example.org");
+  await page.getByRole("button", { name: "Continue", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "2 papers selected" })).toBeVisible();
+  await page.getByRole("button", { name: "Review papers", exact: true }).click();
+  await page.locator(".hosted-source-item input").first().uncheck();
+  expect(removed).toHaveLength(0);
+  const firstTitle = current[0].title;
+  await page.getByRole("button", { name: `Remove from library: ${firstTitle}`, exact: true }).click();
+  const confirm = page.getByRole("alertdialog", { name: "Remove for everyone?" });
+  await expect(confirm).toContainText(firstTitle);
+  await expect(confirm).toContainText("all app users");
+  await expect(confirm).toContainText("remains packaged privately");
+  await expect(confirm.getByRole("button", { name: "Cancel", exact: true })).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(confirm).not.toBeVisible();
+  await expect(page.getByRole("dialog", { name: "Comparison papers" })).toBeVisible();
+  expect(removed).toHaveLength(0);
+  await page.getByRole("button", { name: `Remove from library: ${firstTitle}`, exact: true }).click();
+  await confirm.getByRole("button", { name: "Remove from library", exact: true }).click();
+  await expect(page.locator(".hosted-source-item")).toHaveCount(1);
+  await page.getByRole("button", { name: "Done", exact: true }).click();
+  await expect(page.getByText("From the 1-paper comparison library", { exact: true })).toBeVisible();
+  await page.reload();
+  await page.getByLabel("Email address").fill("another-synthetic@example.org");
+  await page.getByRole("button", { name: "Continue", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "1 papers selected" })).toBeVisible();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.getByRole("button", { name: "Review papers", exact: true }).click();
+  await page.getByRole("button", { name: `Remove from library: ${current[0].title}`, exact: true }).click();
+  await expect(confirm).toContainText("after a retention delay");
+  await expect(confirm.getByRole("button", { name: "Cancel", exact: true })).toBeFocused();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await confirm.getByRole("button", { name: "Remove from library", exact: true }).click();
+  await expect(page.locator(".hosted-source-item")).toHaveCount(0);
+  await page.getByRole("button", { name: "Done", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "0 papers selected" })).toBeVisible();
+  expect(removed).toHaveLength(2);
+});
+
 async function staticResponse(url: string) {
   const pathname = new URL(url).pathname;
   expect(pathname.startsWith(sitePath)).toBe(true);

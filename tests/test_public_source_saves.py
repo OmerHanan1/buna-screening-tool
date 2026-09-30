@@ -155,7 +155,7 @@ def test_cancel_does_not_acknowledge_an_upload_still_arriving(tmp_path, monkeypa
         owner = hashlib.sha256(headers["Authorization"].removeprefix("Bearer ").encode()).hexdigest()
         receipt = str(uuid4())
         with connect() as db:
-            db.execute("INSERT INTO source_saves VALUES(?,?,?,'receiving','','','',10000,?,1)",
+            db.execute("INSERT INTO source_saves VALUES(?,?,?,'receiving','','','',10000,?,1,'0')",
                        (receipt, owner, time.time(), str(uuid4())))
         response = client.delete("/api/public/source-saves/" + receipt, headers=headers)
         assert response.status_code == 409

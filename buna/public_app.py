@@ -180,8 +180,14 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
                     del gate_attempts[key]
 
     def maintenance():
-        while not stopping.wait(60):
+        while not stopping.is_set():
             cleanup()
+            if shared:
+                try:
+                    shared.collect_retired()
+                except Exception as exc:
+                    logger.warning("Retired source cleanup needs retry (%s).", type(exc).__name__)
+            stopping.wait(60)
 
     @asynccontextmanager
     async def lifespan(app):
@@ -309,14 +315,15 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
 
     def library_snapshot():
         warning = ""
-        additions = []
+        snapshot = [{**p, "library_version": "0", "storage_kind": "bundled"} for p in papers]
         if shared:
             try:
-                additions = shared.list()
+                snapshot = shared.visible(papers)
             except Exception as exc:
                 logger.warning("Shared catalog unavailable (%s).", type(exc).__name__)
-                warning = "The shared library is temporarily unavailable. Only the curated papers are shown; shared saving is disabled until it reconnects."
-        return papers + additions, warning
+                warning = "The library is temporarily unavailable. Papers are not shown until removal records can be checked; retry when storage reconnects."
+                snapshot = []
+        return snapshot, warning
 
     @app.get("/api/public/library")
     def library():
@@ -328,18 +335,20 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
             except Exception as exc:
                 logger.warning("Shared capacity unavailable (%s).", type(exc).__name__)
                 warning = "Shared capacity could not be confirmed. Saving is disabled until it reconnects."
-        return {"papers": [{k: p[k] for k in ("sha256", "title", "attribution", "license", "license_url", "source_url", "version")} for p in snapshot],
+        return {"papers": [{k: p[k] for k in ("sha256", "title", "attribution", "license", "license_url", "source_url", "version", "library_version", "storage_kind")} for p in snapshot],
                 "retention_seconds": RETENTION, "shared_saving_available": shared is not None and not warning,
                 "shared_library_warning": warning, "immediate_shared_saving": shared is not None,
-                "shared_capacity": capacity}
+                "shared_capacity": capacity, "library_removal_available": shared is not None and not warning}
 
     from buna.public_source_saves import install_source_saves
     cleanup_source_saves = install_source_saves(
         app, shared=shared, root=root, connect=connect, session=session, lock=lock,
-        gate=gate, active=active, stopping=stopping, runner=source_runner)
+        gate=gate, active=active, stopping=stopping, runner=source_runner, curated_papers=papers)
     from buna.public_source_uploads import install_source_uploads, MAX_FILES, MAX_BATCH_BYTES
     cleanup_source_uploads, snapshot_uploads = install_source_uploads(
         app, root=root, connect=connect, session=session, lock=lock)
+    from buna.public_library_removal import install_library_removal
+    install_library_removal(app, shared=shared, session=session)
 
     def persist_shared(job_id):
         with connect() as db:
@@ -373,7 +382,7 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
                     if hashlib.sha256(original).hexdigest() != entry["sha256"]:
                         raise SharedLibraryError("The retained source fingerprint changed; nothing was saved.")
                     document = json.loads(read_artifact(root / job_id, "parsed-source-" + entry["source_id"] + ".json", MAX_PARSED_BYTES))
-                    outcome = shared.save(original, document, entry["title"])
+                    outcome = shared.save(original, document, entry["title"], expected_version=entry["library_version"])
                     entry.update(state=outcome["state"], reason="")
                 except SharedLibraryError as exc:
                     entry.update(state="failed", reason=str(exc))
@@ -546,13 +555,14 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
                 model = str(form.get("comparison_model", "validated-lexical"))
                 if model not in {"validated-lexical", "classified-v1.1"}:
                     raise HTTPException(422, "Select a supported comparison model.")
-                if not isinstance(selected, list) or not all(isinstance(i, str) for i in selected) or len(selected) != len(set(selected)):
+                if (not isinstance(selected, list) or not all(isinstance(i, str) and re.fullmatch(r"[0-9a-f]{64}", i) for i in selected)
+                        or len(selected) != len(set(selected))):
                     raise HTTPException(422, "Invalid corpus selection.")
                 snapshot, shared_warning = await run_in_threadpool(library_snapshot)
                 approved = {p["sha256"]: p for p in snapshot}
                 if not all(isinstance(i, str) and i in approved for i in selected):
-                    raise HTTPException(503 if shared_warning else 422,
-                                        shared_warning or "Only currently available comparison papers can be selected.")
+                    raise HTTPException(503 if shared_warning else 409,
+                                        shared_warning or "The library changed. Refresh your paper selection before comparing.")
                 target = form.get("target")
                 if not hasattr(target, "read"):
                     raise HTTPException(422, "Upload your manuscript.")
@@ -634,7 +644,9 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
                             retained.mkdir(mode=0o700, exist_ok=True)
                             (retained / (digest + ".pdf")).write_bytes(content)
                         saves.append({"source_id": selected_ids[digest], "sha256": digest, "title": title,
-                                      "state": state, "reason": reason})
+                                      "state": state, "reason": reason,
+                                      "library_version": approved[digest]["library_version"] if state == "already-present"
+                                      else await run_in_threadpool(shared.save_version, digest)})
                 staged = snapshot_uploads(upload_ids, owner, folder)
                 uploaded_bytes = sum((folder / entry["path"]).stat().st_size for entry in staged)
                 uploaded_bytes += sum((folder / name).stat().st_size for name in
@@ -651,6 +663,17 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
                     raise HTTPException(413, "Selected original files exceed the 144 MiB working-input budget. Deselect some uncached papers.")
                 if not sources:
                     raise HTTPException(422, "Select or upload at least one comparison paper.")
+                versions = {digest: approved[digest]["library_version"] for digest in selected}
+                versions.update({entry["sha256"]: entry["library_version"] for entry in saves if entry["state"] == "already-present"})
+                if shared and versions:
+                    from buna.shared_library import LibraryChanged
+                    try:
+                        await run_in_threadpool(shared.assert_selected_current, versions)
+                    except LibraryChanged as exc:
+                        raise HTTPException(409, str(exc)) from None
+                    except Exception as exc:
+                        logger.warning("Library snapshot revalidation failed (%s).", type(exc).__name__)
+                        raise HTTPException(503, "The library could not be revalidated. Nothing was submitted; retry after storage reconnects.") from None
                 attribution_fields = ("title", "attribution", "version", "license", "license_url", "source_url")
                 value = {"target": target_name, "title": Path(target.filename or "Manuscript").name[:255],
                          "sources": sources, "attributions": [{key: approved[i][key] for key in attribution_fields} for i in selected],
