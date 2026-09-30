@@ -93,11 +93,35 @@ Configuration (all three values are required together):
 * `BUNA_SHARED_CONTAINER`: private container name.
 * `BUNA_SHARED_IDENTITY_CLIENT_ID`: existing user-assigned app identity client ID.
 
-Initial shared limits are **50 files**, **512 MiB total original + parsed bytes**,
-and **20 new files per rolling day**. Each additional original PDF remains limited
+Shared limits are **100 user-uploaded files** (curated papers are separate),
+**512 MiB total original + parsed bytes**, and **50 new files per rolling day**.
+`BUNA_SHARED_MAX_PAPERS` and `BUNA_SHARED_MAX_NEW_PER_DAY` can lower the count
+and daily limits; startup rejects settings above the approved 100/50 ceilings.
+The setup page shows remaining count, daily admissions and bytes; these are
+informational snapshots, with authoritative conditional checks at publication.
+Each additional original PDF remains limited
 to 8 MiB; each parsed cache to 32 MiB. A comparison may materialize at most
 192 MiB of shared parsed caches. Existing manuscript, parser, comparison and
 worker time/memory limits still apply; a larger selected corpus can be partial.
+
+Choose or drop **up to 50 additional files**, appending subsequent selections.
+The private upload queue sends **one 8 MiB-maximum file per request**, with a
+**128 MiB per-workspace original-byte budget** (in-flight uploads reserve 8 MiB).
+This is not a 400 MiB multipart request: the 32 MiB request guard remains.
+`POST /source-uploads` returns owner-bound, one-hour IDs. One comparison attaches
+all selected IDs; server-owned originals are copied into an immutable job
+snapshot and content hashes deduplicate sources, never filenames. Different
+contents with the same filename remain distinct. Removing an upload deletes only
+that visitor's temporary original; existing job snapshots and shared papers stay.
+Private uploads are never published without a separate explicit save action.
+Queued uploads can be removed, failed uploads retried, and comparison remains
+disabled until every remaining upload is ready. Extraction failures and runtime
+limits still appear in source coverage, rather than silently dropping sources.
+
+Shared saves also run in a sequential browser queue. **Keep all selected PDFs in
+shared library** is an explicit sharing action; individual checkboxes remain
+unchecked by default. Wait for each durable, library-visible acknowledgement.
+Daily and storage limits may reject part of a batch with per-file reasons.
 
 `catalog-v1.json` uses conditional ETag writes. A counted pending reservation is
 committed before blob uploads; only after both immutable objects exist is the
@@ -119,8 +143,23 @@ Saving uses the same single resource slot as comparison; up to five source saves
 can wait without launching competing parsers. Source parsing has a 35-second
 timer, 40 CPU seconds (45 hard), 45-second supervisor deadline and 96 MiB temporary
 file bound, with the same UID/seccomp/address-space isolation. Admission/retries
-are bounded to 20 per rolling day per replica, with at most three attempts per
-receipt. Persistent catalog quotas still apply across replicas/restarts.
+are bounded to **150 per rolling day per replica**, with at most three attempts
+per receipt. All standalone parsing shares a **2,250-second daily wall-time
+budget**: reserve 45 seconds before each isolated parse, then return unused time.
+Duplicate catalog content skips parsing and does not use new-paper quota.
+Persistent catalog quotas still apply across replicas/restarts. Browser rate-limit
+retries honor `Retry-After`, retry at most twice, and do not automatically retry
+daily limits. The service still admits ten comparisons/day, three/visitor.
+
+The 768 MiB runtime and 256 MiB worker-directory guards remain. Working originals
+are limited to 144 MiB including the manuscript and uncached curated sources.
+The worker keeps at most 32 MiB of newly parsed private caches, reparsing later
+sources when necessary rather than accumulating every parsed document. Existing
+legacy comparison-bound save caches retain their previous behavior. Shared
+parsed snapshots remain limited to 192 MiB and admission reserves working space.
+The engine remains bounded to 480 comparison seconds, 720 CPU seconds and
+780 wall seconds; full completion is workload-dependent, not guaranteed for
+every 50-file batch.
 
 The comparison report becomes available independently of durable saving.
 “Saving”, “Saved”, “Already in the library”, “Not saved” and failure reasons are
@@ -157,6 +196,20 @@ $0.0208/GB-month, $0.05/10,000 writes, and $0.004/10,000 reads. For example,
 operations, excluding transfer and compute. This fits the existing $5 allowance
 in the approximate $21-at-100-active-hours baseline; it is not a hard spending cap.
 The existing $20/$25 budget alerts and min-zero/max-one compute profile remain.
+No resource or warm-replica change accompanies bulk uploads. The source-parser
+ceiling is 37.5 minutes/day (18.75 hours/30 days), versus the previous
+20-admission worst case of 15 minutes/day. This bounds additional parser work to
+11.25 hours/30 days at maximum sustained use; queue, gateway, comparison and
+storage operations also cost money. The approximate budget is not a hard spend
+guarantee, and measured low-cost synthetic papers do not predict every PDF.
+
+Offline resource verification: `deploy/verify_bulk_local.py` creates only original
+synthetic documents. Run it inside the candidate Linux image with `--network none
+--cpus 1 --memory 2g` and `PYTHONPATH=/app`. A 45-page manuscript against
+44 cached plus 50 independently uploaded eight-page sources checked all 94 and
+produced a PDF in 48.21 seconds, with 118,521,856 bytes worker peak RSS in the
+initial candidate run. These are synthetic workload observations, not live-user
+or worst-case performance claims.
 
 Do not copy local SQLite data or visitor history into this store. Do not enable
 anonymous blob access, issue browser SAS links, or put originals in Git/Pages.

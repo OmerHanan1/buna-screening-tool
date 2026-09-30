@@ -155,6 +155,7 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
 
     def cleanup():
         cleanup_source_saves()
+        cleanup_source_uploads()
         with lock, connect() as db:
             rows = db.execute("SELECT id FROM jobs WHERE created<?", (time.time() - RETENTION,)).fetchall()
             for row in rows:
@@ -200,7 +201,7 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
     app.add_middleware(PublicBodyLimit)
     app.add_middleware(CORSMiddleware, allow_origins=[origin] if origin else [],
                        allow_methods=["GET", "POST", "DELETE"], allow_headers=["Authorization", "Content-Type", "Idempotency-Key"],
-                       expose_headers=["Content-Disposition"], allow_credentials=False)
+                       expose_headers=["Content-Disposition", "Retry-After"], allow_credentials=False)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=hosts)
 
     def session(request):
@@ -225,6 +226,9 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
 
     @app.middleware("http")
     async def admission(request, call_next):
+        rate_headers = {"Retry-After": "60"}
+        if origin and request.headers.get("origin") == origin:
+            rate_headers.update({"Access-Control-Allow-Origin": origin, "Access-Control-Expose-Headers": "Retry-After", "Vary": "Origin"})
         if request.url.path != "/health":
             now = time.time()
             # A global ceiling remains effective even if client IP/proxy headers are spoofed.
@@ -237,7 +241,7 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
                     while q and q[0] < now - 60:
                         q.popleft()
                     if len(q) >= limit:
-                        return JSONResponse({"detail": "Rate limit reached; wait a minute."}, 429)
+                        return JSONResponse({"detail": "Rate limit reached; wait a minute."}, 429, headers=rate_headers)
                 requests["global"].append(now)
                 requests[key].append(now)
         supplied_origin = request.headers.get("origin")
@@ -317,14 +321,25 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
     @app.get("/api/public/library")
     def library():
         snapshot, warning = library_snapshot()
+        capacity = None
+        if shared and not warning:
+            try:
+                capacity = shared.capacity()
+            except Exception as exc:
+                logger.warning("Shared capacity unavailable (%s).", type(exc).__name__)
+                warning = "Shared capacity could not be confirmed. Saving is disabled until it reconnects."
         return {"papers": [{k: p[k] for k in ("sha256", "title", "attribution", "license", "license_url", "source_url", "version")} for p in snapshot],
                 "retention_seconds": RETENTION, "shared_saving_available": shared is not None and not warning,
-                "shared_library_warning": warning, "immediate_shared_saving": shared is not None}
+                "shared_library_warning": warning, "immediate_shared_saving": shared is not None,
+                "shared_capacity": capacity}
 
     from buna.public_source_saves import install_source_saves
     cleanup_source_saves = install_source_saves(
         app, shared=shared, root=root, connect=connect, session=session, lock=lock,
         gate=gate, active=active, stopping=stopping, runner=source_runner)
+    from buna.public_source_uploads import install_source_uploads, MAX_FILES, MAX_BATCH_BYTES
+    cleanup_source_uploads, snapshot_uploads = install_source_uploads(
+        app, root=root, connect=connect, session=session, lock=lock)
 
     def persist_shared(job_id):
         with connect() as db:
@@ -512,15 +527,16 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
                     raise HTTPException(429, "Daily service comparison limit reached.")
                 if db.execute("SELECT COUNT(*) FROM submissions WHERE owner=?", (owner,)).fetchone()[0] >= 3:
                     raise HTTPException(429, "Session comparison limit reached.")
-                if sum(p.stat().st_size for p in root.rglob("*") if p.is_file()) > MAX_DISK - 256 * 1024 * 1024:
+                if job_storage_bytes(root) > MAX_DISK - 320 * 1024 * 1024:
                     raise HTTPException(429, "Temporary storage is full. Try later.")
                 # Never recycle OS identities when quota/retention rows expire.
                 uid = 10000 + db.execute("INSERT INTO identities DEFAULT VALUES").lastrowid
                 if uid >= 60000:
                     raise HTTPException(503, "Service identity capacity exhausted; maintenance required.")
             folder.mkdir(mode=0o700)
-            async with request.form(max_files=6, max_fields=4, max_part_size=8192) as form:
+            async with request.form(max_files=MAX_FILES + 1, max_fields=6, max_part_size=16384) as form:
                 selected = json.loads(str(form.get("selected", "[]")))
+                upload_ids = json.loads(str(form.get("uploaded_sources", "[]")))
                 keep_indices = json.loads(str(form.get("save_sources", "[]")))
                 if (not isinstance(keep_indices, list) or any(type(i) is not int for i in keep_indices)
                         or len(keep_indices) != len(set(keep_indices))):
@@ -572,6 +588,8 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
                         shared_bytes += paper["parsed_bytes"]
                         if shared_bytes > 192 * 1024 * 1024:
                             raise HTTPException(422, "Selected shared papers exceed the 192 MiB per-comparison cache limit. Deselect some papers.")
+                        if job_storage_bytes(root) + paper["parsed_bytes"] > MAX_DISK - 320 * 1024 * 1024:
+                            raise HTTPException(429, "Shared source snapshots exceed current temporary capacity. Retry after other work expires.")
                         try:
                             sources.append(await run_in_threadpool(shared.materialize, paper, shared_cache))
                         except Exception as exc:
@@ -586,8 +604,8 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
                         shutil.copyfile(corpus_root / paper["filename"], folder / name)
                         sources.append({"path": name, "title": paper["title"]})
                 manual = form.getlist("sources")
-                if len(manual) > 5:
-                    raise HTTPException(422, "At most five personal comparison files.")
+                if not isinstance(upload_ids, list) or len(manual) + len(upload_ids) > MAX_FILES:
+                    raise HTTPException(422, "At most 50 personal comparison files. Use individual uploads for batches exceeding 32 MiB.")
                 if any(i < 0 or i >= len(manual) for i in keep_indices):
                     raise HTTPException(422, "Only supplementary comparison files can be selected for sharing.")
                 saves = []
@@ -617,6 +635,20 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
                             (retained / (digest + ".pdf")).write_bytes(content)
                         saves.append({"source_id": selected_ids[digest], "sha256": digest, "title": title,
                                       "state": state, "reason": reason})
+                staged = snapshot_uploads(upload_ids, owner, folder)
+                uploaded_bytes = sum((folder / entry["path"]).stat().st_size for entry in staged)
+                uploaded_bytes += sum((folder / name).stat().st_size for name in
+                                      [p.name for p in folder.glob("source-*")])
+                if uploaded_bytes > MAX_BATCH_BYTES:
+                    raise HTTPException(413, "Comparison uploads exceed the 128 MiB batch budget.")
+                for entry in staged:
+                    if entry["sha256"] not in selected_ids:
+                        selected_ids[entry["sha256"]] = str(len(sources) + 1)
+                        sources.append(entry)
+                    else:
+                        (folder / entry["path"]).unlink()
+                if job_storage_bytes(folder) > 144 * 1024 * 1024:
+                    raise HTTPException(413, "Selected original files exceed the 144 MiB working-input budget. Deselect some uncached papers.")
                 if not sources:
                     raise HTTPException(422, "Select or upload at least one comparison paper.")
                 attribution_fields = ("title", "attribution", "version", "license", "license_url", "source_url")

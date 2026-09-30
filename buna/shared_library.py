@@ -6,18 +6,21 @@ import hashlib
 import json
 import logging
 import math
+import os
 import re
 import time
 from pathlib import Path
 from typing import Protocol
 from uuid import uuid4
 
-MAX_PAPERS = 50
+MAX_PAPERS = int(os.environ.get("BUNA_SHARED_MAX_PAPERS", "100"))
 MAX_TOTAL_BYTES = 512 * 1024 * 1024
 MAX_ORIGINAL_BYTES = 8 * 1024 * 1024
 MAX_PARSED_BYTES = 32 * 1024 * 1024
 MAX_CATALOG_BYTES = 512 * 1024
-MAX_NEW_PER_DAY = 20
+MAX_NEW_PER_DAY = int(os.environ.get("BUNA_SHARED_MAX_NEW_PER_DAY", "50"))
+if not 1 <= MAX_PAPERS <= 100 or not 1 <= MAX_NEW_PER_DAY <= 50:
+    raise RuntimeError("Shared quotas must remain within 100 papers and 50 new papers per day.")
 CATALOG = "catalog-v1.json"
 _SHA = re.compile(r"^[0-9a-f]{64}$")
 _VERSION = re.compile(r"^(0|[0-9a-f]{32})$")
@@ -353,6 +356,14 @@ class SharedLibrary:
             except Conflict:
                 continue
         raise SharedLibraryError("The unfinished writer needs operator review before retry.")
+
+    def capacity(self):
+        catalog, _ = self._read()
+        used = sum(p["original_bytes"] + p["parsed_bytes"] for p in catalog["papers"].values())
+        daily = sum(t >= time.time() - 86400 for t in catalog["reservations"])
+        return {"paper_limit": MAX_PAPERS, "papers_remaining": MAX_PAPERS - len(catalog["papers"]),
+                "daily_limit": MAX_NEW_PER_DAY, "daily_remaining": max(0, MAX_NEW_PER_DAY - daily),
+                "byte_limit": MAX_TOTAL_BYTES, "bytes_remaining": MAX_TOTAL_BYTES - used}
 
     def record_save_event(self, receipt: str, state: str, code: str = ""):
         """Bounded operator diagnostics, without visitor identity or document metadata."""

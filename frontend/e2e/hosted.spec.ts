@@ -2,6 +2,7 @@ import { test, expect } from "@playwright/test";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 
 const site = process.env.HOSTED_SITE_URL || "https://kind-field-035b3910f.4.azurestaticapps.net/";
 const backend = "https://paper-overlap-api.purpleflower-beedf5ce.eastus.azurecontainerapps.io";
@@ -229,6 +230,7 @@ for (const variant of [
 
       expect(route.request().headers().authorization).toBe("Bearer synthetic-capability-only");
       if (url.pathname.endsWith("/library")) return respond({ papers });
+      if (url.pathname.endsWith("/source-uploads")) return respond({ id: "synthetic-upload", state: "ready", digest: "f".repeat(64) }, 201);
       if (method === "POST") { submitted = true; return respond({ id: "synthetic-job", status: "running" }, 202); }
       if (method === "DELETE") return respond({ status: "deleted" });
       if (url.pathname.endsWith(".pdf")) return route.fulfill({ contentType: "application/pdf", body: "%PDF-1.7\nSynthetic download signature fixture" });
@@ -380,6 +382,7 @@ test("checkbox saves without a manuscript or comparison and refreshed selections
     if (url.pathname.endsWith("/config")) return route.fulfill({ json: { mode: "email-gate" } });
     if (url.pathname.endsWith("/session")) return route.fulfill({ json: { token: "synthetic-shared-capability" } });
     if (url.pathname.endsWith("/library")) return route.fulfill({ json: { papers: saved ? [...papers, addition] : papers, shared_saving_available: true, immediate_shared_saving: true } });
+    if (url.pathname.endsWith("/source-uploads")) return route.fulfill({ status: 201, json: { id: "private-upload", state: "ready", digest: addition.sha256 } });
     if (url.pathname.endsWith("/source-saves")) {
       saveSubmitted = route.request().postData() || "";
       return route.fulfill({ status: 202, json: { id: "source-receipt", state: "queued", digest: addition.sha256 } });
@@ -397,6 +400,7 @@ test("checkbox saves without a manuscript or comparison and refreshed selections
     return route.fulfill({ json: { id: "shared-fixture", status: "complete", checked: 44, total: 44, overlap_percent: 12, score_available: true,
       library_saves: [] } });
   });
+
   await page.goto(site);
   await page.getByLabel("Email address").fill("fixture@example.org");
   await page.getByRole("button", { name: "Continue", exact: true }).click();
@@ -411,7 +415,7 @@ test("checkbox saves without a manuscript or comparison and refreshed selections
   await keep.check();
   await expect(page.getByRole("status", { name: "Save status: comparison.pdf" })).toContainText("Saving queued");
   expect(comparisons).toBe(0);
-  expect(saveSubmitted).toContain('name="share_authorized"');
+  await expect.poll(() => saveSubmitted).toContain('name="share_authorized"');
   expect(saveSubmitted).not.toContain('name="target"');
   await page.getByLabel("Your paper", { exact: true }).setInputFiles({ name: "manuscript.pdf", mimeType: "application/pdf", buffer: Buffer.from("%PDF-1.7\nSynthetic header fixture") });
   await page.getByRole("checkbox", { name: /authorized to upload/ }).check();
@@ -434,4 +438,163 @@ test("checkbox saves without a manuscript or comparison and refreshed selections
   await page.getByRole("button", { name: "Review papers", exact: true }).click();
   await expect(page.locator(".hosted-source-item input").first()).not.toBeChecked();
   await expect(page.locator(".hosted-source-item input").last()).toBeChecked();
+});
+
+for (const method of ["chooser", "drop"] as const) test(`bulk ${method}: 50 original PDFs, private queue and one 94-source comparison`, async ({ page }) => {
+    test.setTimeout(180_000);
+    const generated = spawnSync("../.venv/bin/python", ["-c",
+      "import json,base64,pymupdf;out=[]\nfor i in range(50):\n d=pymupdf.open();p=d.new_page();p.insert_text((50,60),f'Original synthetic research paper {i}');p.insert_text((50,90),'Introduction: Independent experiments and complete source conclusions.');out.append(base64.b64encode(d.tobytes()).decode());d.close()\nprint(json.dumps(out))"]);
+    expect(generated.status).toBe(0);
+    const files = (JSON.parse(generated.stdout.toString()) as string[]).map((value, index) => ({
+      name: `Original ${index}.pdf`, mimeType: "application/pdf", buffer: Buffer.from(value, "base64"),
+    }));
+    let uploads = 0, compares = 0, saves = 0, posted = "";
+    await page.clock.install();
+    await page.route(site + "**", async route => route.fulfill(await staticResponse(route.request().url())));
+    await page.route(backend + "/**", async route => {
+      const url = new URL(route.request().url());
+      if (url.pathname.endsWith("/config")) return route.fulfill({ json: { mode: "email-gate" } });
+      if (url.pathname.endsWith("/session")) return route.fulfill({ json: { token: "synthetic-bulk-capability" } });
+      if (url.pathname.endsWith("/library")) return route.fulfill({ json: { papers, shared_saving_available: true, immediate_shared_saving: true } });
+      if (url.pathname.endsWith("/source-uploads")) {
+        const index = uploads++;
+        return route.fulfill({ status: 201, json: { id: `private-${index}`, state: "ready",
+          digest: createHash("sha256").update(files[index].buffer).digest("hex") } });
+      }
+      if (url.pathname.endsWith("/source-saves")) { saves++; return route.fulfill({ status: 500 }); }
+      if (url.pathname.endsWith("/jobs")) {
+        compares++; posted = route.request().postData() || "";
+        return route.fulfill({ status: 202, json: { id: "bulk-comparison", status: "running", source_count: 94 } });
+      }
+      return route.fulfill({ json: { id: "bulk-comparison", status: "complete", checked: 94, total: 94, overlap_percent: 0 } });
+    });
+    await page.goto(site);
+    await page.getByLabel("Email address").fill("fixture@example.org");
+    await page.getByRole("button", { name: "Continue", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "44 papers selected" })).toBeVisible();
+    if (method === "chooser") await page.getByLabel("Additional comparison papers").setInputFiles(files);
+    else {
+      const transfer = await page.evaluateHandle(values => {
+        const data = new DataTransfer();
+        values.forEach((value, index) => data.items.add(new File([Uint8Array.from(atob(value), character => character.charCodeAt(0))], `Original ${index}.pdf`, { type: "application/pdf" })));
+        return data;
+      }, files.map(file => file.buffer.toString("base64")));
+      await page.getByRole("region", { name: "Comparison upload queue" }).dispatchEvent("drop", { dataTransfer: transfer });
+    }
+    await expect(page.getByRole("button", { name: /^Remove comparison/ })).toHaveCount(50);
+    await page.getByLabel("Your paper", { exact: true }).setInputFiles({ name: "target.txt", mimeType: "text/plain", buffer: Buffer.from("Original manuscript only.") });
+    await page.getByRole("checkbox", { name: /authorized to upload/ }).check();
+    await expect(page.getByRole("button", { name: "Compare papers", exact: true })).toBeDisabled();
+    for (let index = 0; index < 50; index++) {
+      await page.clock.runFor(2200);
+      await expect(page.getByRole("status", { name: `Upload status: Original ${index}.pdf`, exact: true })).toContainText("Ready for comparison");
+    }
+    await expect(page.getByText("Ready to compare against 94 papers.", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Compare papers", exact: true }).click();
+    await page.clock.runFor(1500);
+    await expect(page.getByText("94 / 94", { exact: true })).toBeVisible();
+    expect(uploads).toBe(50); expect(compares).toBe(1); expect(saves).toBe(0);
+    expect(posted).toContain('name="uploaded_sources"');
+    expect(posted).not.toContain('name="sources"');
+    for (let index = 0; index < 50; index++) expect(posted).toContain(`"private-${index}"`);
+});
+
+test("bulk keep queues 50 saves without a manuscript and a fresh visitor selects durable sources", async ({ page }) => {
+  await page.clock.install();
+  const additions: typeof papers = [];
+  let privateUploads = 0, saves = 0, comparisons = 0, submitted = "";
+  const files = Array.from({ length: 50 }, (_, index) => ({
+    name: `Save ${index}.pdf`, mimeType: "application/pdf", buffer: Buffer.from(`%PDF-1.7\nOriginal synthetic source fixture ${index}`),
+  }));
+  const digest = (index: number) => createHash("sha256").update(files[index].buffer).digest("hex");
+  await page.route(site + "**", async route => route.fulfill(await staticResponse(route.request().url())));
+  await page.route(backend + "/**", async route => {
+    const url = new URL(route.request().url());
+    if (url.pathname.endsWith("/config")) return route.fulfill({ json: { mode: "email-gate" } });
+    if (url.pathname.endsWith("/session")) return route.fulfill({ json: { token: "synthetic-save-bulk-capability" } });
+    if (url.pathname.endsWith("/library")) return route.fulfill({ json: { papers: [...papers, ...additions], shared_saving_available: true, immediate_shared_saving: true } });
+    if (url.pathname.endsWith("/source-uploads")) {
+      const index = privateUploads++;
+      return route.fulfill({ status: 201, json: { id: `upload-${index}`, state: "ready", digest: digest(index) } });
+    }
+    if (url.pathname.endsWith("/source-saves")) {
+      expect(route.request().postData()).not.toContain('name="target"');
+      const index = saves++;
+      additions.push({ ...papers[0], sha256: digest(index), title: files[index].name });
+      return route.fulfill({ status: 202, json: { id: `saved-${index}`, state: "saved", digest: digest(index) } });
+    }
+    if (url.pathname.endsWith("/jobs")) {
+      comparisons++; submitted = route.request().postData() || "";
+      return route.fulfill({ status: 202, json: { id: "saved-batch", status: "running", source_count: 94 } });
+    }
+    return route.fulfill({ json: { id: "saved-batch", status: "complete", checked: 94, total: 94, overlap_percent: 0 } });
+  });
+  await page.goto(site);
+  await page.getByLabel("Email address").fill("fixture@example.org");
+  await page.getByRole("button", { name: "Continue", exact: true }).click();
+  await page.getByLabel("Additional comparison papers").setInputFiles(files);
+  await page.getByRole("button", { name: "Keep all selected PDFs in shared library", exact: true }).click();
+  for (let index = 0; index < 50; index++) {
+    await page.clock.runFor(3500);
+    await expect(page.getByRole("status", { name: `Save status: Save ${index}.pdf`, exact: true })).toContainText("Saved to shared library.");
+  }
+  expect(saves).toBe(50); expect(comparisons).toBe(0);
+  await expect(page.getByText("From the 94-paper comparison library", { exact: true })).toBeVisible();
+  await page.reload();
+  await page.getByLabel("Email address").fill("fixture@example.org");
+  await page.getByRole("button", { name: "Continue", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "94 papers selected", exact: true })).toBeVisible();
+  await page.getByLabel("Your paper", { exact: true }).setInputFiles({ name: "target.txt", mimeType: "text/plain", buffer: Buffer.from("Original manuscript.") });
+  await page.getByRole("checkbox", { name: /authorized to upload/ }).check();
+  await page.getByRole("button", { name: "Compare papers", exact: true }).click();
+  await page.clock.runFor(1500);
+  await expect(page.getByText("94 / 94", { exact: true })).toBeVisible();
+  expect(comparisons).toBe(1);
+  expect(submitted).toContain('name="uploaded_sources"\r\n\r\n[]');
+});
+
+test("bulk appends, same-name contents, per-file rejection, cancellation and 429 retry", async ({ page }) => {
+  await page.clock.install();
+  let uploads = 0, limited = true;
+  const contentDigest = "a".repeat(64);
+  await page.route(site + "**", async route => route.fulfill(await staticResponse(route.request().url())));
+  await page.route(backend + "/**", async route => {
+    const url = new URL(route.request().url());
+    if (url.pathname.endsWith("/config")) return route.fulfill({ json: { mode: "email-gate" } });
+    if (url.pathname.endsWith("/session")) return route.fulfill({ json: { token: "synthetic-append-capability" } });
+    if (url.pathname.endsWith("/library")) return route.fulfill({ json: { papers } });
+    if (url.pathname.endsWith("/source-uploads")) {
+      uploads++;
+      if (limited) { limited = false; return route.fulfill({ status: 429, headers: { "Retry-After": "10", "Access-Control-Expose-Headers": "Retry-After" }, json: { detail: "Queue busy." } }); }
+      return route.fulfill({ status: 201, json: { id: `upload-${uploads}`, state: "ready", digest: uploads === 3 ? "b".repeat(64) : contentDigest } });
+    }
+    return route.fulfill({ json: { state: "deleted" } });
+  });
+  await page.goto(site);
+  await page.getByLabel("Email address").fill("fixture@example.org");
+  await page.getByRole("button", { name: "Continue", exact: true }).click();
+  const file = (name: string, content: string) => ({ name, mimeType: "application/pdf", buffer: Buffer.from(content) });
+  await page.getByLabel("Additional comparison papers").setInputFiles([
+    file("same.pdf", "%PDF-1.7\nFirst original"), file("same.pdf", "%PDF-1.7\nOther original"),
+    file("bad.pdf", "not a PDF"), file("cancel.pdf", "%PDF-1.7\ncancel queued")]);
+  await expect(page.getByRole("button", { name: /^Remove comparison/ })).toHaveCount(4);
+  await expect.poll(() => uploads).toBe(1);
+  await page.getByLabel("Additional comparison papers").setInputFiles([file("copy.pdf", "%PDF-1.7\nFirst original")]);
+  await expect(page.getByRole("button", { name: /^Remove comparison/ })).toHaveCount(5);
+  await page.getByLabel("Additional comparison papers").setInputFiles([file("six.pdf", "%PDF-1.7\nsixth")]);
+  await expect(page.getByRole("button", { name: /^Remove comparison/ })).toHaveCount(6);
+  await expect(page.getByRole("status", { name: "Upload status: bad.pdf", exact: true })).toContainText("Upload failed");
+  await page.getByRole("button", { name: "Remove comparison cancel.pdf", exact: true }).click();
+  await page.clock.runFor(9000);
+  expect(uploads).toBe(1);
+  await page.clock.runFor(12000);
+  await expect(page.getByRole("status", { name: "Upload status: same.pdf", exact: true }).first()).toContainText("Ready for comparison");
+  await page.clock.runFor(2200);
+  await expect(page.getByRole("status", { name: "Upload status: same.pdf", exact: true }).nth(1)).toContainText("Ready for comparison");
+  await page.clock.runFor(2200);
+  await expect(page.getByRole("status", { name: "Upload status: copy.pdf", exact: true })).toContainText("Identical content");
+  await expect(page.getByRole("status", { name: "Upload status: same.pdf", exact: true })).toHaveCount(2);
+  await page.getByLabel("Additional comparison papers").setInputFiles(Array.from({ length: 46 }, (_, index) => file(`extra${index}.pdf`, "%PDF-1.7\nextra")));
+  await expect(page.getByRole("alert")).toContainText("up to 50");
+  await expect(page.getByRole("button", { name: /^Remove comparison/ })).toHaveCount(5);
 });

@@ -37,7 +37,9 @@ means losing access. Download reports promptly.
 
 Admission limits: 10 comparisons per rolling day per replica, three per session,
 200 live sessions, one active worker, 32 MiB request envelope, 10 MiB/250,000-character
-manuscripts and at most five personal 8 MiB sources. Limits reset if a replica
+manuscripts and at most 50 personal 8 MiB sources, privately staged one at a time
+within a 128 MiB batch budget (the multipart request cap remains 32 MiB).
+Limits reset if a replica
 restarts. Rate/quotas and one replica reduce abuse but are **not a billing cap**.
 No external DOI, AI or discovery requests occur in the public worker.
 

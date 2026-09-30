@@ -117,12 +117,14 @@ def main():
     target_fingerprint = text_fingerprint(target["text"])
     share_results = {}
     sources = []
+    parsed_cache_bytes = 0
     for index, entry in enumerate(request["sources"]):
         sources.append({"id": str(index + 1), "title": entry["title"], "filename": entry["title"],
                         "entry": entry, "status": "parsed", "parsed": True})
     if not sources:
         raise ValueError("At least one readable comparison source is required.")
     def load_document(source):
+        nonlocal parsed_cache_bytes
         entry = source["entry"]
         progress("load-source", source_index=int(source["id"]))
         if entry.get("unavailable_reason"):
@@ -165,7 +167,10 @@ def main():
             except SharedLibraryError as exc:
                 share_results[source["id"]] = {"validated": False, "reason": str(exc)}
             atomic_json(Path("share-validation.json"), share_results)
-        atomic_json(parsed, document, ensure_ascii=False)
+        encoded = json.dumps(document, ensure_ascii=False).encode()
+        if entry.get("keep_in_library") or parsed_cache_bytes + len(encoded) <= 32 * 1024 * 1024:
+            parsed.write_bytes(encoded)
+            parsed_cache_bytes += len(encoded)
         return document
     last_progress = 0
     def comparison_progress(message):

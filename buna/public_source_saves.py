@@ -20,6 +20,8 @@ from buna.shared_library import MAX_ORIGINAL_BYTES, MAX_PARSED_BYTES, SharedLibr
 
 logger = logging.getLogger(__name__)
 PENDING = {"receiving", "queued", "validating", "saving"}
+MAX_ADMISSIONS = 150
+DAILY_PARSE_SECONDS = 2250
 
 
 def install_source_saves(app, *, shared, root, connect, session, lock, gate, active,
@@ -33,6 +35,7 @@ def install_source_saves(app, *, shared, root, connect, session, lock, gate, act
             title TEXT NOT NULL,uid INTEGER NOT NULL,request_key TEXT NOT NULL,attempts INTEGER NOT NULL DEFAULT 1,
             UNIQUE(owner,request_key))""")
         db.execute("CREATE TABLE source_save_admissions(created REAL NOT NULL)")
+        db.execute("CREATE TABLE source_parse_budget(id TEXT PRIMARY KEY,created REAL NOT NULL,seconds REAL NOT NULL)")
 
     def cleanup():
         with lock, connect() as db:
@@ -41,6 +44,7 @@ def install_source_saves(app, *, shared, root, connect, session, lock, gate, act
                     shutil.rmtree(parent / row["id"], ignore_errors=False)
                     db.execute("DELETE FROM source_saves WHERE id=?", (row["id"],))
             db.execute("DELETE FROM source_save_admissions WHERE created<?", (time.time() - 86400,))
+            db.execute("DELETE FROM source_parse_budget WHERE created<?", (time.time() - 86400,))
 
     def owned(receipt, owner):
         with connect() as db:
@@ -66,6 +70,8 @@ def install_source_saves(app, *, shared, root, connect, session, lock, gate, act
         folder = parent / receipt
         work = folder / "worker"
         state, reason, code = "failed", "Saving did not finish. Retry while this workspace is open.", "save-interrupted"
+        parse_started = None
+        budget_id = str(uuid4())
         try:
             deadline = time.monotonic() + 840
             while not stopping.is_set() and time.monotonic() < deadline:
@@ -86,6 +92,17 @@ def install_source_saves(app, *, shared, root, connect, session, lock, gate, act
                     return
                 db.execute("UPDATE source_saves SET state='validating' WHERE id=?", (receipt,))
             event(receipt, "validating")
+            if row["digest"] in shared.curated_hashes or any(p["sha256"] == row["digest"] for p in shared.list()):
+                state, reason, code = "already-present", "", ""
+                event(receipt, state)
+                return
+            with lock, connect() as db:
+                used = db.execute("SELECT COALESCE(SUM(seconds),0) FROM source_parse_budget WHERE created>?",
+                                  (time.time() - 86400,)).fetchone()[0]
+                if used + 45 > DAILY_PARSE_SECONDS:
+                    raise SharedLibraryError("The daily source parsing time budget is reached. Retry tomorrow; nothing was saved.")
+                db.execute("INSERT INTO source_parse_budget VALUES(?,?,45)", (budget_id, time.time()))
+            parse_started = time.monotonic()
             # The original stays gateway-owned; the parser receives a disposable copy.
             if work.exists():
                 shutil.rmtree(work)
@@ -119,6 +136,10 @@ def install_source_saves(app, *, shared, root, connect, session, lock, gate, act
                         reason = "Source parsing failed or exceeded safe limits. This paper was not saved."
                     raise SharedLibraryError(reason)
             document = json.loads(read_artifact(work, "parsed.json", MAX_PARSED_BYTES))
+            with lock, connect() as db:
+                db.execute("UPDATE source_parse_budget SET seconds=? WHERE id=?",
+                           (min(45, time.monotonic() - parse_started), budget_id))
+            parse_started = None
             original = (folder / "original.pdf").read_bytes()
             if hashlib.sha256(original).hexdigest() != row["digest"]:
                 raise SharedLibraryError("The retained source fingerprint changed. Nothing was saved.")
@@ -145,6 +166,14 @@ def install_source_saves(app, *, shared, root, connect, session, lock, gate, act
                 except ProcessLookupError:
                     pass
                 process.wait(timeout=5)
+            if parse_started is not None:
+                with lock, connect() as db:
+                    db.execute("UPDATE source_parse_budget SET seconds=? WHERE id=?",
+                               (min(45, time.monotonic() - parse_started), budget_id))
+            if work.exists():
+                shutil.rmtree(work)
+            if state in {"saved", "already-present"}:
+                (folder / "original.pdf").unlink(missing_ok=True)
             with lock, connect() as db:
                 current = db.execute("SELECT state FROM source_saves WHERE id=?", (receipt,)).fetchone()
                 if current and current["state"] == "cancelled":
@@ -188,9 +217,12 @@ def install_source_saves(app, *, shared, root, connect, session, lock, gate, act
             if prior:
                 return public(prior)
             if db.execute("SELECT COUNT(*) FROM source_saves WHERE state IN ('receiving','queued','validating','saving')").fetchone()[0] >= 5:
-                raise HTTPException(429, "The source-save queue is full. Retry shortly.")
-            if db.execute("SELECT COUNT(*) FROM source_save_admissions WHERE created>?", (time.time() - 86400,)).fetchone()[0] >= 20:
-                raise HTTPException(429, "The source-save request limit is reached. Retry later.")
+                raise HTTPException(429, "The source-save queue is full. Retry shortly.", headers={"Retry-After": "10"})
+            receiving = db.execute("SELECT COUNT(*) FROM source_saves WHERE state='receiving'").fetchone()[0]
+            if job_storage_bytes(root) + (receiving + 1) * MAX_ORIGINAL_BYTES > 640 * 1024 * 1024:
+                raise HTTPException(429, "Temporary save storage is full. Retry after active work finishes.", headers={"Retry-After": "60"})
+            if db.execute("SELECT COUNT(*) FROM source_save_admissions WHERE created>?", (time.time() - 86400,)).fetchone()[0] >= MAX_ADMISSIONS:
+                raise HTTPException(429, "The 150 daily source-save attempts are used. Retry tomorrow.", headers={"Retry-After": "86400"})
             uid = 10000 + db.execute("INSERT INTO identities DEFAULT VALUES").lastrowid
             if uid >= 60000:
                 raise HTTPException(503, "Service identity capacity exhausted.")
@@ -218,7 +250,9 @@ def install_source_saves(app, *, shared, root, connect, session, lock, gate, act
                             raise HTTPException(413, "Comparison PDFs must be at most 8 MiB.")
                         digest.update(chunk)
                         output.write(chunk)
-                if not total or (folder / "original.pdf").read_bytes()[:5] != b"%PDF-":
+                with (folder / "original.pdf").open("rb") as original:
+                    signature = original.read(5)
+                if not total or signature != b"%PDF-":
                     raise HTTPException(422, "A nonempty PDF is required.")
                 await run_in_threadpool(event, receipt, "queued")
                 with lock, connect() as db:
@@ -252,9 +286,9 @@ def install_source_saves(app, *, shared, root, connect, session, lock, gate, act
                 if row["attempts"] >= 3:
                     raise HTTPException(429, "This save reached its retry limit. Check the file and try again later.")
                 if db.execute("SELECT COUNT(*) FROM source_saves WHERE state IN ('receiving','queued','validating','saving')").fetchone()[0] >= 5:
-                    raise HTTPException(429, "The source-save queue is full. Retry shortly.")
-                if db.execute("SELECT COUNT(*) FROM source_save_admissions WHERE created>?", (time.time() - 86400,)).fetchone()[0] >= 20:
-                    raise HTTPException(429, "The source-save request limit is reached. Retry later.")
+                    raise HTTPException(429, "The source-save queue is full. Retry shortly.", headers={"Retry-After": "10"})
+                if db.execute("SELECT COUNT(*) FROM source_save_admissions WHERE created>?", (time.time() - 86400,)).fetchone()[0] >= MAX_ADMISSIONS:
+                    raise HTTPException(429, "The 150 daily source-save attempts are used. Retry tomorrow.", headers={"Retry-After": "86400"})
                 uid = 10000 + db.execute("INSERT INTO identities DEFAULT VALUES").lastrowid
                 if uid >= 60000:
                     raise HTTPException(503, "Service identity capacity exhausted.")

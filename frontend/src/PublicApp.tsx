@@ -8,10 +8,10 @@ type Job = { id: string; status: string; checked?: number; total?: number; overl
 const base = (import.meta.env.VITE_PUBLIC_API_URL || "").replace(/\/$/, "");
 const gatedMode = import.meta.env.VITE_EMAIL_GATE === "true";
 type SourceSave = { id?: string; key: string; state: string; reason?: string; digest?: string };
-const savePending = (save: SourceSave) => ["uploading", "receiving", "queued", "validating", "saving", "confirming"].includes(save.state);
+const savePending = (save: SourceSave) => ["waiting", "uploading", "receiving", "queued", "validating", "saving", "confirming"].includes(save.state);
 const saveReady = (save?: SourceSave) => !!save && ["saved", "already-present"].includes(save.state);
 class RequestError extends Error {
-  constructor(message: string, readonly status: number) { super(message); }
+  constructor(message: string, readonly status: number, readonly retryAfter = 60) { super(message); }
 }
 
 export default function PublicApp() {
@@ -22,9 +22,14 @@ export default function PublicApp() {
   const [keepSources, setKeepSources] = useState<Set<File>>(new Set());
   const [sourceSaves, setSourceSaves] = useState<Map<File, SourceSave>>(new Map());
   const sourceSavesRef = useRef(new Map<File, SourceSave>());
+  const [uploads, setUploads] = useState<Map<File, SourceSave>>(new Map());
+  const uploadsRef = useRef(new Map<File, SourceSave>());
+  const uploadRunning = useRef(false);
+  const sourcesRef = useRef<File[]>([]);
   const libraryRef = useRef<HostedPaper[]>([]);
   const libraryRequest = useRef(0);
   const [sharedAvailable, setSharedAvailable] = useState(false);
+  const [sharedCapacity, setSharedCapacity] = useState<{ paper_limit: number; papers_remaining: number; daily_limit: number; daily_remaining: number; bytes_remaining: number } | null>(null);
   const [libraryWarning, setLibraryWarning] = useState("");
   const [saveRetrying, setSaveRetrying] = useState(false);
   const [job, setJob] = useState<Job | null>(null);
@@ -68,7 +73,8 @@ export default function PublicApp() {
         setJob(null);
         setError("This comparison is no longer available. Temporary reports expire or may be lost after a service restart.");
       }
-      throw new RequestError(typeof data.detail === "string" ? data.detail : `Request failed (${response.status}).`, response.status);
+      throw new RequestError(typeof data.detail === "string" ? data.detail : `Request failed (${response.status}).`, response.status,
+        Math.max(1, Number(response.headers.get("Retry-After")) || 60));
     }
     return response;
   }
@@ -76,7 +82,7 @@ export default function PublicApp() {
     const sequence = ++libraryRequest.current;
     setLoadingLibrary(true); setError("");
     try {
-      const response = gatedMode ? await request("/library") : await fetch(`${base}/api/public/library`, { credentials: "omit", signal: AbortSignal.timeout(90000) });
+      const response = gatedMode ? await queueRequest("/library", {}, () => false) : await fetch(`${base}/api/public/library`, { credentials: "omit", signal: AbortSignal.timeout(90000) });
       if (!response.ok) throw new Error("The comparison library could not be loaded. Please retry.");
       const data = await response.json();
       if (sequence !== libraryRequest.current) return libraryRef.current;
@@ -85,6 +91,7 @@ export default function PublicApp() {
       setPapers(data.papers);
       setSelected(current => data.papers.filter((paper: HostedPaper) => !preserveSelection || !previous.has(paper.sha256) || current.includes(paper.sha256)).map((paper: HostedPaper) => paper.sha256));
       setSharedAvailable(data.shared_saving_available === true && data.immediate_shared_saving === true);
+      setSharedCapacity(data.shared_capacity || null);
       setLibraryWarning(data.shared_library_warning || "");
       return data.papers as HostedPaper[];
     } catch (e) { if (sequence === libraryRequest.current) setError(e instanceof Error ? e.message : "The service could not be reached. Retry shortly."); }
@@ -121,6 +128,65 @@ export default function PublicApp() {
     const next = new Map(sourceSavesRef.current); next.set(file, value);
     sourceSavesRef.current = next; setSourceSaves(next);
   }
+  function updateUpload(file: File, value: SourceSave) {
+    const next = new Map(uploadsRef.current); next.set(file, value);
+    uploadsRef.current = next; setUploads(next);
+  }
+  async function queueRequest(path: string, options: RequestInit, cancelled: () => boolean) {
+    for (let attempt = 0; ; attempt++) {
+      if (cancelled()) throw new Error("Cancelled before upload.");
+      try { return await request(path, options); }
+      catch (e) {
+        if (!(e instanceof RequestError) || e.status !== 429 || e.retryAfter > 120 || attempt >= 2) throw e;
+        await new Promise(resolve => window.setTimeout(resolve, e.retryAfter * 1000));
+      }
+    }
+  }
+  useEffect(() => {
+    if (!hasUploadAccess() || uploadRunning.current) return;
+    const next = [...uploadsRef.current].find(([, value]) => value.state === "waiting");
+    if (!next) return;
+    const [file, value] = next;
+    uploadRunning.current = true;
+    updateUpload(file, { ...value, state: "uploading" });
+    void (async () => {
+      try {
+        if (!token.current) token.current = (await (await request("/session", { method: "POST" })).json()).token;
+        const form = new FormData(); form.append("source", file);
+        const result = await (await queueRequest("/source-uploads", { method: "POST", body: form,
+          headers: { "Idempotency-Key": value.key } }, () => uploadsRef.current.get(file)?.state === "cancelled")).json();
+        if (uploadsRef.current.get(file)?.state === "cancelled") {
+          await request(`/source-uploads/${result.id}`, { method: "DELETE" });
+        } else updateUpload(file, { ...value, ...result });
+      } catch (e) {
+        updateUpload(file, { ...value, state: "failed", reason: (e as Error).message });
+      } finally {
+        await new Promise(resolve => window.setTimeout(resolve, 2000));
+        uploadRunning.current = false;
+        setUploads(new Map(uploadsRef.current));
+      }
+    })();
+  }, [uploads, entered]);
+  function hasUploadAccess() { return !gatedMode || entered; }
+  async function removeSource(file: File) {
+    const saved = sourceSavesRef.current.get(file);
+    if (saved && savePending(saved)) {
+      if (saved.state === "waiting") updateSourceSave(file, { ...saved, state: "cancelled" });
+      else { setSourceError("Cancel this paper's save before removing it."); return; }
+    }
+    const upload = uploadsRef.current.get(file);
+    if (upload?.state === "uploading") { setSourceError("Wait for this upload to finish before removing it."); return; }
+    try {
+      if (upload?.id) await request(`/source-uploads/${upload.id}`, { method: "DELETE" });
+    } catch (e) {
+      if (!(e instanceof RequestError) || e.status !== 404) { setSourceError((e as Error).message); return; }
+    }
+    if (upload) updateUpload(file, { ...upload, state: "cancelled" });
+    if (saved?.digest) setSelected(previous => previous.filter(id => id !== saved.digest));
+    sourcesRef.current = sourcesRef.current.filter(item => item !== file);
+    setSources(sourcesRef.current);
+    setKeepSources(previous => { const next = new Set(previous); next.delete(file); return next; });
+  }
   async function confirmSourceSave(file: File, value: SourceSave) {
     updateSourceSave(file, { ...value, state: "confirming" });
     const library = await loadLibrary(true);
@@ -130,9 +196,21 @@ export default function PublicApp() {
     }
     updateSourceSave(file, value);
   }
-  async function beginSourceSave(file: File) {
-    let prior = sourceSavesRef.current.get(file);
+  function beginSourceSave(file: File) {
+    const prior = sourceSavesRef.current.get(file);
     if (prior && (savePending(prior) || saveReady(prior))) return;
+    updateSourceSave(file, { ...(prior?.state === "cancelled" ? {} : prior), key: prior?.state === "cancelled" ? crypto.randomUUID() : prior?.key || crypto.randomUUID(), state: "waiting", reason: "" });
+  }
+  useEffect(() => {
+    if (!entered || [...sourceSavesRef.current.values()].some(value => savePending(value) && value.state !== "waiting")) return;
+    const next = [...sourceSavesRef.current].find(([, value]) => value.state === "waiting");
+    if (!next) return;
+    const timer = window.setTimeout(() => void processSourceSave(next[0]), 3000);
+    return () => window.clearTimeout(timer);
+  }, [sourceSaves, entered]);
+  async function processSourceSave(file: File) {
+    let prior = sourceSavesRef.current.get(file);
+    if (prior && ((savePending(prior) && prior.state !== "waiting") || saveReady(prior))) return;
     if (prior?.state === "cancelled") prior = undefined;
     const value: SourceSave = { ...prior, key: prior?.key || crypto.randomUUID(), state: "uploading", reason: "" };
     updateSourceSave(file, value);
@@ -156,7 +234,8 @@ export default function PublicApp() {
       }
       if (!result) {
         const form = new FormData(); form.append("source", file); form.append("share_authorized", "true");
-        result = await (await request("/source-saves", { method: "POST", body: form, headers: { "Idempotency-Key": value.key } })).json();
+        result = await (await queueRequest("/source-saves", { method: "POST", body: form, headers: { "Idempotency-Key": value.key } },
+          () => sourceSavesRef.current.get(file)?.state === "cancelled")).json();
       }
       const updated = { ...value, ...result };
       if (saveReady(updated)) await confirmSourceSave(file, updated);
@@ -167,6 +246,11 @@ export default function PublicApp() {
   }
   async function cancelSourceSave(file: File) {
     const value = sourceSavesRef.current.get(file);
+    if (value?.state === "waiting") {
+      updateSourceSave(file, { ...value, state: "cancelled" });
+      setKeepSources(previous => { const next = new Set(previous); next.delete(file); return next; });
+      return;
+    }
     if (!value?.id) return;
     try {
       const result = await (await request(`/source-saves/${value.id}`, { method: "DELETE" })).json();
@@ -184,7 +268,7 @@ export default function PublicApp() {
       try { for (const [file, value] of sourceSavesRef.current) {
         if (!value.id || !["queued", "validating", "saving", "receiving"].includes(value.state)) continue;
         try {
-          const result = await (await request(`/source-saves/${value.id}`)).json();
+          const result = await (await queueRequest(`/source-saves/${value.id}`, {}, () => stopped)).json();
           if (stopped) return;
           const updated = { ...value, ...result };
           if (saveReady(updated)) await confirmSourceSave(file, updated);
@@ -209,6 +293,7 @@ export default function PublicApp() {
     finally { setEntering(false); }
   }
   function leave() {
+    if ([...uploadsRef.current.values()].some(value => ["waiting", "uploading"].includes(value.state))) { setError("Wait for comparison uploads to finish or remove queued files before leaving."); return; }
     if (pendingSourceSaves) { setError("Selected papers are still being saved. Wait for Saved to shared library before leaving."); return; }
     if ([...sourceSaves.values()].some(save => save.state === "failed") && !window.confirm("Some selected papers were not confirmed saved. Leaving loses access to retry with these files. Leave anyway?")) return;
     if (job?.status === "running") { setError("Cancel the running comparison before leaving this workspace."); return; }
@@ -219,6 +304,7 @@ export default function PublicApp() {
     setJob(null); setPapers([]); setSelected([]); setTarget(null); setSources([]); setConsent(false); setError("");
     setKeepSources(new Set()); setSharedAvailable(false); setLibraryWarning("");
     sourceSavesRef.current = new Map(); setSourceSaves(new Map()); libraryRef.current = [];
+    sourcesRef.current = []; uploadsRef.current = new Map(); setUploads(new Map());
     setModel("validated-lexical");
   }
   async function chooseTarget(file: File) {
@@ -232,22 +318,20 @@ export default function PublicApp() {
   async function addSources(files: File[]) {
     if (busy) return;
     setSourceError("");
-    if (sources.length + files.length > 5) { setSourceError("You can add up to five comparison files."); return; }
+    if (sourcesRef.current.length + files.length > 50) { setSourceError("You can add up to 50 comparison files. Remove files or choose a smaller batch; nothing from this selection was added."); return; }
+    if ([...sourcesRef.current, ...files].reduce((sum, file) => sum + file.size, 0) > 128 * 1024 * 1024) {
+      setSourceError("Comparison uploads exceed the 128 MiB batch budget. Choose a smaller batch."); return;
+    }
+    sourcesRef.current = [...sourcesRef.current, ...files];
+    setSources(sourcesRef.current);
     for (const file of files) {
       const invalid = await validateFile(file, 8);
-      if (invalid) { setSourceError(`${file.name}: ${invalid}`); return; }
+      if (!sourcesRef.current.includes(file)) continue;
+      updateUpload(file, { key: crypto.randomUUID(), state: invalid ? "failed" : "waiting", reason: invalid });
     }
-    setSources(previous => {
-      const result = [...previous];
-      for (const file of files) {
-        if (!result.some(s => s.name === file.name && s.size === file.size && s.lastModified === file.lastModified)) result.push(file);
-      }
-      if (result.length > 5) { setSourceError("You can add up to five comparison files."); return previous; }
-      return result;
-    });
   }
   async function compare() {
-    if (!target || !consent || busy || pendingSourceSaves) return;
+    if (!target || !consent || busy || pendingSourceSaves || sources.some(file => uploadsRef.current.get(file)?.state !== "ready")) return;
     const readyDigests = sources.flatMap(file => {
       const saved = sourceSavesRef.current.get(file);
       return saveReady(saved) && saved?.digest ? [saved.digest] : [];
@@ -261,9 +345,9 @@ export default function PublicApp() {
       const form = new FormData();
       form.append("target", target); form.append("selected", JSON.stringify(comparisonSelected));
       form.append("comparison_model", model);
-      comparisonUploads.forEach(file => form.append("sources", file));
+      form.append("uploaded_sources", JSON.stringify(comparisonUploads.map(file => uploadsRef.current.get(file)!.id)));
       const fingerprint = JSON.stringify({ target: [target.name, target.size, target.lastModified], selected: comparisonSelected, model,
-        sources: comparisonUploads.map(file => [file.name, file.size, file.lastModified]) });
+        sources: comparisonUploads.map(file => uploadsRef.current.get(file)!.id) });
       if (submission.current?.fingerprint !== fingerprint) submission.current = { key: crypto.randomUUID(), fingerprint };
       const created = await (await request("/jobs", { method: "POST", body: form, headers: { "Idempotency-Key": submission.current.key } })).json();
       const current = created.status === "running" ? created : await (await request(`/jobs/${created.id}`)).json();
@@ -306,25 +390,30 @@ export default function PublicApp() {
     } catch (e) { setError((e as Error).message); }
     finally { setSaveRetrying(false); }
   }
-  function newComparison() {
+  async function newComparison() {
     if (pendingSourceSaves) { setError("Wait for selected papers to finish saving."); return; }
     if ([...sourceSaves.values()].some(save => save.state === "failed") && !window.confirm("Some selected papers were not confirmed saved. Start over without saving them?")) return;
     if (job?.library_saves?.some(save => ["pending", "saving"].includes(save.state))) { setError("Wait for shared saving to finish before starting a new comparison."); return; }
     if (!window.confirm("Keep your downloaded report before starting a new comparison. Continue?")) return;
+    try {
+      if (uploadsRef.current.size) await request("/source-uploads", { method: "DELETE" });
+    } catch (e) { setError((e as Error).message); return; }
     submission.current = null;
     setModel("validated-lexical");
     setJob(null); setTarget(null); setSources([]); setConsent(false); setError(""); setFileError(""); setSourceError("");
     setKeepSources(new Set());
     sourceSavesRef.current = new Map(); setSourceSaves(new Map());
+    sourcesRef.current = []; uploadsRef.current = new Map(); setUploads(new Map());
     void loadLibrary(true);
   }
   const hasAccess = !gatedMode || entered;
-  const totalUpload = (target?.size || 0) + sources.reduce((sum, file) => sum + file.size, 0);
   const comparisonCount = new Set([...selected, ...sources.flatMap(file => {
     const saved = sourceSaves.get(file); return saveReady(saved) && saved?.digest ? [saved.digest] : [];
-  })]).size + sources.filter(file => !saveReady(sourceSaves.get(file))).length;
+  }), ...sources.flatMap(file => uploads.get(file)?.digest ? [uploads.get(file)!.digest!] : [])]).size;
   const disabledReason = pendingSourceSaves ? "Saving selected papers first. No comparison is needed to save them." : loadingLibrary ? "Loading comparison papers…" : !target ? "Add your manuscript to begin." : !selected.length && !sources.length ? "Select at least one comparison paper."
-    : totalUpload > 32 * 1024 * 1024 - 16384 ? "Combined uploads exceed the 32 MB request limit."
+    : [...keepSources].some(file => sourceSaves.get(file)?.state === "failed") ? "Retry failed saves, or uncheck Keep to compare without saving those papers."
+    : sources.some(file => uploads.get(file)?.state === "failed") ? "Retry or remove each failed comparison upload before comparing."
+    : sources.some(file => uploads.get(file)?.state !== "ready") ? "Uploading comparison papers one at a time. Wait until every selected file is ready."
     : !consent ? "Confirm your upload permission below." : "";
   const fallbackWarning = job?.warnings?.find(w => w.startsWith("Abstract heading not detected"));
   const stages: Record<string, string> = { starting: "Starting the isolated comparison", "parse-manuscript": "Extracting manuscript text",
@@ -356,23 +445,38 @@ export default function PublicApp() {
           <fieldset disabled={busy} className="hosted-surface hosted-form">
             <section className="hosted-section"><span className="hosted-label">Your manuscript</span><ManuscriptInput file={target} error={fileError} onFile={chooseTarget} onRemove={() => { targetChoice.current++; setTarget(null); setFileError(""); }} /></section>
             <section className="hosted-sources-row"><div><h2>{selected.length} papers selected</h2><p>From the {papers.length}-paper comparison library</p></div><button onClick={() => setReviewing(true)} disabled={!papers.length}>Review papers</button></section>
-            <section className="hosted-extras">
+            <section className="hosted-extras" aria-label="Comparison upload queue" onDragOver={e => e.preventDefault()} onDrop={e => { e.preventDefault(); void addSources(Array.from(e.dataTransfer.files)); }}>
               <input ref={extraInput} tabIndex={-1} className="hosted-hidden-input" type="file" multiple accept=".pdf,.txt" aria-label="Additional comparison papers" onChange={e => { void addSources(Array.from(e.target.files || [])); e.target.value = ""; }} />
               <button className="hosted-text-button" onClick={() => extraInput.current?.click()}><Plus size={15} />Add your own comparison papers</button>
+              <p className="hosted-shared-notice">Choose or drop up to 50 comparison papers; additional selections append. 8 MiB per file, 128 MiB per batch. Files upload privately one at a time; nothing is shared unless you explicitly keep it. {sources.length} selected, {sources.filter(file => uploads.get(file)?.state === "ready").length} uploaded.</p>
+              {sharedAvailable && sources.some(file => /\.pdf$/i.test(file.name)) && <button onClick={() => {
+                const pdfs = sources.filter(file => /\.pdf$/i.test(file.name));
+                setKeepSources(previous => new Set([...previous, ...pdfs]));
+                pdfs.forEach(beginSourceSave);
+              }}>Keep all selected PDFs in shared library</button>}
               {sources.map((file, i) => <div key={`${file.name}-${i}`}>
-                <div className="hosted-extra-file"><FileText size={15} aria-hidden="true" /><span title={file.name}>{file.name}</span><small>{fileSize(file.size)}</small><button disabled={!!sourceSaves.get(file) && savePending(sourceSaves.get(file)!)} className="hosted-icon-button" aria-label={`Remove comparison ${file.name}`} onClick={() => { const digest = sourceSaves.get(file)?.digest; if (digest) setSelected(previous => previous.filter(id => id !== digest)); setSources(previous => previous.filter((_, index) => index !== i)); setKeepSources(previous => { const next = new Set(previous); next.delete(file); return next; }); }}><X size={15} /></button></div>
+                <div className="hosted-extra-file"><FileText size={15} aria-hidden="true" /><span title={file.name}>{file.name}</span><small>{fileSize(file.size)}</small><button disabled={uploads.get(file)?.state === "uploading" || (!!sourceSaves.get(file) && savePending(sourceSaves.get(file)!) && sourceSaves.get(file)?.state !== "waiting")} className="hosted-icon-button" aria-label={`Remove comparison ${file.name}`} onClick={() => void removeSource(file)}><X size={15} /></button></div>
+                <div role="status" aria-label={`Upload status: ${file.name}`} className="hosted-shared-notice">
+                  {uploads.get(file)?.state === "ready" ? sources.slice(0, i).some(other => uploads.get(other)?.digest === uploads.get(file)?.digest) ? "Uploaded. Identical content already selected; compared once." : "Uploaded privately. Ready for comparison."
+                    : uploads.get(file)?.state === "failed" ? <><strong>Upload failed.</strong> {uploads.get(file)?.reason} <button onClick={async () => {
+                      const invalid = await validateFile(file, 8);
+                      const value = uploadsRef.current.get(file)!;
+                      updateUpload(file, { ...value, state: invalid ? "failed" : "waiting", reason: invalid });
+                    }}>Retry upload</button></> : uploads.get(file)?.state === "uploading" ? "Uploading this file (rate-limit waits retry up to twice)…" : "Queued for private upload…"}
+                </div>
                 {sharedAvailable && /\.pdf$/i.test(file.name) && <label className="hosted-shared-option"><input type="checkbox" checked={keepSources.has(file)} disabled={!!sourceSaves.get(file) && savePending(sourceSaves.get(file)!)} onChange={e => { const checked = e.target.checked; setKeepSources(previous => { const next = new Set(previous); if (checked) next.add(file); else next.delete(file); return next; }); if (checked) void beginSourceSave(file); }} />Keep in library for future comparisons<span className="hosted-sr-only">: {file.name}</span></label>}
                 {sourceSaves.has(file) && <div className="hosted-shared-notice" role="status" aria-label={`Save status: ${file.name}`}>
                   {saveReady(sourceSaves.get(file)) ? <><strong>{sourceSaves.get(file)?.state === "already-present" ? "Already in shared library." : "Saved to shared library."}</strong> Listed as “{papers.find(paper => paper.sha256 === sourceSaves.get(file)?.digest)?.title}” in Review papers. Removing or unchecking here does not delete the saved paper.</>
                     : sourceSaves.get(file)?.state === "failed" ? <><strong>Not confirmed saved.</strong> {sourceSaves.get(file)?.reason} <button onClick={() => void beginSourceSave(file)}>Retry save</button></>
                     : sourceSaves.get(file)?.state === "cancelled" ? "Save cancelled. The file was not added by this request."
-                    : sourceSaves.get(file)?.state === "queued" ? "Saving queued — waiting for the current parser/comparison to finish."
+                    : ["waiting", "queued"].includes(sourceSaves.get(file)?.state || "") ? "Saving queued — waiting for the current parser/comparison to finish."
                     : "Saving… validating the PDF and confirming permanent library storage."}
                   {sourceSaves.get(file)?.id && <small> Save reference: {sourceSaves.get(file)?.id}</small>}
-                  {["queued", "validating"].includes(sourceSaves.get(file)?.state || "") && <button onClick={() => void cancelSourceSave(file)}>Cancel save</button>}
+                  {["waiting", "queued", "validating"].includes(sourceSaves.get(file)?.state || "") && <button onClick={() => void cancelSourceSave(file)}>Cancel save</button>}
                 </div>}
               </div>)}
               {sharedAvailable && sources.some(file => /\.pdf$/i.test(file.name)) && <p className="hosted-shared-notice">Checking the box immediately uploads and saves that comparison PDF; no manuscript or comparison is required. Only check it if you’re authorized to store and share it for hosted comparisons and matching excerpts. Saved papers are available to everyone with app access. Wait for “Saved to shared library” before leaving; an unfinished save may be lost after a service restart.</p>}
+              {sharedCapacity && <p className="hosted-shared-notice">Shared capacity: {sharedCapacity.papers_remaining} of {sharedCapacity.paper_limit} user-paper slots remaining; {sharedCapacity.daily_remaining} of {sharedCapacity.daily_limit} new papers remaining this rolling day; {fileSize(sharedCapacity.bytes_remaining)} storage remaining (originals plus parsed text). Duplicate content does not use a new-paper slot. Capacity is checked again when saving.</p>}
               {sourceError && <p role="alert" className="hosted-field-error">{sourceError}</p>}
               <details className="hosted-model-details"><summary>{model === "classified-v1.1" ? "Advanced · experimental model selected" : "Advanced"}</summary>
                 <label htmlFor="comparison-model">Comparison model</label>
@@ -416,7 +520,7 @@ export default function PublicApp() {
             {save.state === "failed" && <button onClick={() => void beginSourceSave(file)}>Retry save</button>}
             {save.id && <small> Save reference: {save.id}</small>}</p>)}
         </section>}
-        <details className="hosted-info"><summary>Privacy, access and source credits</summary><p>Files are processed on Azure, not sent to external AI or discovery providers. This page’s random access token stays in memory. Refreshing or leaving loses access. Manuscripts, reports and unsaved comparison files expire within one hour and may disappear sooner after restart. Comparison PDFs explicitly kept in the shared library persist for future visitors; the manuscript is never saved by that option.</p><p>Email ownership is not verified; anyone knowing an allowed email can enter and use shared papers for comparisons. Separate visitor tokens protect each visitor’s jobs. Do not upload confidential or sensitive manuscripts.</p><p>Manuscripts: 10 MB, 250 pages, 250,000 extracted characters. Up to five added papers, 8 MB each; total upload limit 32 MB. Pages and extractability are checked during comparison. Resource limits can produce partial results.</p><button onClick={() => setReviewing(true)}>Review source credits</button><button onClick={credits}>Download source credits</button></details>
+        <details className="hosted-info"><summary>Privacy, access and source credits</summary><p>Files are processed on Azure, not sent to external AI or discovery providers. This page’s random access token stays in memory. Refreshing or leaving loses access. Manuscripts, reports and unsaved comparison files expire within one hour and may disappear sooner after restart. Comparison PDFs explicitly kept in the shared library persist for future visitors; the manuscript is never saved by that option.</p><p>Email ownership is not verified; anyone knowing an allowed email can enter and use shared papers for comparisons. Separate visitor tokens protect each visitor’s jobs. Do not upload confidential or sensitive manuscripts.</p><p>Manuscripts: 10 MiB, 250 pages, 250,000 extracted characters. Up to 50 added papers, 8 MiB each, 128 MiB per batch, uploaded individually within the 32 MiB request limit. Pages and extractability are checked during comparison. Resource limits can produce partial results, with every selected source accounted for.</p><button onClick={() => setReviewing(true)}>Review source credits</button><button onClick={credits}>Download source credits</button></details>
         <p className="hosted-info">Temporary workspace · Download your report before leaving.</p>
       </>}
     </main>
