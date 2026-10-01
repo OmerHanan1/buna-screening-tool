@@ -1,10 +1,18 @@
 # improvedEng: ordered alignment with precision exclusions
 
 New comparisons use model ID `improvedEng`, algorithm version
-`improvedEng-v3-precision`. Standard remains the default; Standard 2.5.4 and
+`improvedEng-v3.1-precision`. Standard remains the default; Standard 2.5.4 and
 classified-v1.1 matching and denominator behavior are unchanged. Saved reports
 retain their original rules and values; neither library caches nor historical
 reports are rewritten or replayed.
+
+The narrow v3.1 follow-up counts literal numbers and statistical tokens as
+meaningful Similar words and relaxes the acceptance anchor from four words/two
+content words to **three consecutive words/one meaningful word**. The minimum
+of four distinct shared meaningful types stays in place. No other alignment,
+quotation, citation, header, Exact, denominator or evidence-budget rule changes.
+This deliberately accepts more numeric/statistical wording; it is not a measured
+precision/recall improvement on the unavailable user report.
 
 ## 1. Running headers and original coordinates
 
@@ -125,18 +133,32 @@ apply). Header/front/bibliography/long-quote denominator overlaps count once.
 ## 3. Similar content and contiguous-run acceptance
 
 In addition to the three/nine/five/60% retrieval policy, a Similar path needs
-**four distinct shared matched content words**, plus a **four-word contiguous
-equal run containing at least two content words**. Contiguity is required on
+**four distinct shared matched meaningful words**, plus a **three-word contiguous
+equal run containing at least one meaningful word**. Contiguity is required on
 both header-cleaned streams, never after stripping citations or quotes.
 The guard never applies to Exact, even generic scientific wording or numbers.
 
-`literal-content-types-stopwords-statistics-v1` is frozen in `improved_eng.py`:
-an alphabetic normalized token of at least two characters is content unless in
-the explicit function-word set or statistics-symbol set
-`b d f n p r t z df sd se sem ci es η β χ μ σ ρ`.
-Numeric/mixed alphanumeric tokens and citation tokens are not content. There
-is no stemming: `level` and `levels` are different normalized lexical types.
+`literal-meaningful-types-numbers-statistics-v2` is frozen in `improved_eng.py`:
+an alphabetic normalized token of at least two characters is meaningful unless
+in the existing function-word set. The statistics tokens
+`b d f m n p r t z df sd se sem ci es η β χ μ σ ρ` and literal numeric tokens
+matching `\d+(?:[.,]\d+)*` are also meaningful. Existing casefolding makes
+`CI`, `M` and `SD` match their lowercase forms. Numeric values remain literal:
+`0.05` does not match `0.06`, and there is no numeric wildcard or new number
+normalization. Different numbers count as distinct types only if each actually
+matches on both sides. Repeated equal numbers count once toward distinctness.
+Mixed alphanumeric tokens are not newly meaningful. Citation tokens, including
+years, remain ineligible for Similar seeds, meaningful types, nine-word minimum
+and density. There is no stemming: `level` and `levels` remain different types.
 Unmatched context words cannot satisfy either requirement.
+
+The saved `distinct_matched_content_words` diagnostic retains its field name
+for compatibility but uses the saved content-policy version's definition.
+v3.1 records `strongest_three_word_run_meaningful_words`; old four-word
+diagnostics remain readable/exportable without recomputing saved reports.
+The algorithm/content-policy versions distinguish matching behavior; the
+normalization and eligibility versions are unchanged because neither token
+normalization nor denominator masks changed.
 
 ## 5. Evidence consolidation
 
@@ -170,9 +192,9 @@ Each scored or raw excluded alignment records:
 * Density on each side and each side's complete gap sequence.
 * Citation pairs in the alignment and citation tokens inside each span.
 * Header and quote counts, local eligible words, distinct matched content types,
-  four-word anchor strength, alternative count and original/logical spans.
+  three-word anchor strength, alternative count and original/logical spans.
 
-Per-source rejection counters identify the distinct-content or four-word-anchor
+Per-source rejection counters identify the distinct-content or three-word-anchor
 qualification stage without storing rejected candidate text.
 
 Similarity diagnostics remain downloadable as JSON/CSV through the existing

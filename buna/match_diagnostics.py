@@ -14,6 +14,7 @@ FIELDS = [
     "header_removed_words", "source_header_removed_words", "matched_quoted_words",
     "quotation_tokens_inside_span", "source_matched_quoted_words", "source_quotation_tokens_inside_span",
     "local_eligible_words", "distinct_matched_content_words", "strongest_four_word_run_content_words",
+    "strongest_three_word_run_meaningful_words",
     "content_policy_version", "alignment_alternative_count", "unique_target_matched_words",
 ]
 

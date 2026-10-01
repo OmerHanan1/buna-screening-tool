@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import re
 import time
 from collections import defaultdict
 from bisect import bisect_left, bisect_right
@@ -27,12 +28,12 @@ from buna.score_policy import (
 )
 
 MODEL_ID = "improvedEng"
-VERSION = "improvedEng-v3-precision"
+VERSION = "improvedEng-v3.1-precision"
 NORMALIZATION_VERSION = "nfkc-casefold-literal-numeric-document-local-hyphens-layout-v2"
 WORKING_INDEX_BYTES = 128 * 1024 * 1024
 Pair = tuple[int, int]
 Path = tuple[Pair, ...]
-CONTENT_POLICY_VERSION = "literal-content-types-stopwords-statistics-v1"
+CONTENT_POLICY_VERSION = "literal-meaningful-types-numbers-statistics-v2"
 _STOPWORDS = frozenset((
     "a an and are as at be been being but by can could did do does done for from had has have having he her "
     "hers him his how i if in into is it its itself may might more most must no nor not of off on once only or "
@@ -40,7 +41,8 @@ _STOPWORDS = frozenset((
     "they this those through to too under until up very was we were what when where which while who whom why "
     "will with would you your also both each few further here just via per vs al et"
 ).split())
-_STATISTICS = frozenset("b d f n p r t z df sd se sem ci es η β χ μ σ ρ".split())
+_STATISTICS = frozenset("b d f m n p r t z df sd se sem ci es η β χ μ σ ρ".split())
+_NUMBER = re.compile(r"\d+(?:[.,]\d+)*")
 ELIGIBILITY_PROFILE = "improvedEng-layout-longquotes-v1"
 DENOMINATOR_DESCRIPTION = (
     "Unique original manuscript word positions excluding confirmed running headers, front matter before the recognized "
@@ -51,7 +53,8 @@ DENOMINATOR_DESCRIPTION = (
 
 
 def _content(word: str) -> bool:
-    return len(word) >= 2 and word.isalpha() and word not in _STOPWORDS and word not in _STATISTICS
+    return (word in _STATISTICS or _NUMBER.fullmatch(word) is not None
+            or (len(word) >= 2 and word.isalpha() and word not in _STOPWORDS))
 
 
 def content_details(path: Path, mw: list[str], m_cited: list[bool], s_cited: list[bool]) -> dict:
@@ -70,17 +73,17 @@ def content_details(path: Path, mw: list[str], m_cited: list[bool], s_cited: lis
             distinct.add(mw[a])
         run.append(content)
         longest = max(longest, len(run))
-        if len(run) >= 4:
-            strongest = max(strongest, sum(run[-4:]))
+        if len(run) >= 3:
+            strongest = max(strongest, sum(run[-3:]))
         previous = (a, b)
     return {"distinct_matched_content_words": len(distinct), "longest_exact_run": longest,
-            "strongest_four_word_run_content_words": strongest,
+            "strongest_three_word_run_meaningful_words": strongest,
             "content_policy_version": CONTENT_POLICY_VERSION}
 
 
 def accepts_similar(path: Path, mw: list[str], m_cited: list[bool], s_cited: list[bool]) -> bool:
     info = content_details(path, mw, m_cited, s_cited)
-    return valid(path) and info["distinct_matched_content_words"] >= 4 and info["strongest_four_word_run_content_words"] >= 2
+    return valid(path) and info["distinct_matched_content_words"] >= 4 and info["strongest_three_word_run_meaningful_words"] >= 1
 
 
 @dataclass(frozen=True)
@@ -421,7 +424,7 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
         row = {"source_id": sid, "status": "compared", "limits_reached": [],
                "scored_search_complete": False, "audit_search_complete": False,
                "preprint_status": "unknown", "exact_matches": 0, "similar_matches": 0,
-               "similar_qualification_rejections": {"distinct-content": 0, "four-word-anchor": 0}}
+               "similar_qualification_rejections": {"distinct-content": 0, "three-word-anchor": 0}}
         coverage.append(row)
         started = time.monotonic()
         remaining_sources = sum(not item.get("excluded") for _, item in ordered[number:])
@@ -509,7 +512,7 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
                 else:
                     rejected = content_details(path, mw, m_cited, s_cited)
                     stage = ("distinct-content" if rejected["distinct_matched_content_words"] < 4
-                             else "four-word-anchor")
+                             else "three-word-anchor")
                     row["similar_qualification_rejections"][stage] += 1
             row["scored_search_complete"] = True
             phase = "audit"
@@ -728,7 +731,8 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
                 "normalization_version": NORMALIZATION_VERSION, "source_time_limit_seconds": source_seconds,
                 "layout_version": LAYOUT_VERSION,
                 "similar_content_policy": {"version": CONTENT_POLICY_VERSION, "minimum_distinct_content_words": 4,
-                                          "minimum_exact_run": 4, "minimum_content_words_in_four_word_run": 2},
+                                          "minimum_exact_run": 3, "minimum_meaningful_words_in_three_word_run": 1,
+                                          "meaningful_words": "Non-stopword lexical types plus literal numbers and statistical tokens; citations never qualify"},
                 "quotation_policy": "improvedEng: balanced quotes of at most three words ignored; longer quotes excluded individually on both sides when enabled, retaining gap/span positions",
                 "evidence_deduplication": "One source/target-span/source-span record; compatible shared-pair unions revalidated, incompatible same-span alignments retained as compact alternative_alignments; Exact subruns preserved",
                 "evidence_memory_policy": "live-retained-scored-priority-v1",
@@ -759,11 +763,11 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
                          "audit_complete": bool(coverage) and all(
                              r["audit_search_complete"] or r["status"] in {"excluded-by-user", "excluded-identical"}
                              for r in coverage),
-                         "search": "Three-word-seeded ordered alternatives; four distinct content words and a contiguous four-word run with two content words required for Similar only. Headers removed logically; citations and long quotes retain gap positions."},
+                         "search": "Three-word-seeded ordered alternatives; four distinct meaningful words (including literal numbers/statistics) and a contiguous three-word run with one meaningful word required for Similar only. Headers removed logically; citations and long quotes retain gap positions."},
         "methodology": {
             "name": MODEL_ID, "version": VERSION, "normalization": NORMALIZATION_VERSION,
             "exact": "At least nine contiguous equal eligible normalized words after header removal; contiguous citations retain Exact credit; short quotes remain eligible.",
-            "similar": "At least nine eligible noncitation equal words, four distinct content types, and a four-word contiguous exact run containing at least two content words. Retrieval seed three, gap at most five and global density at least 60% independently per side. Citations and enabled long quotes consume gap/span positions.",
+            "similar": "At least nine eligible noncitation equal words, four distinct meaningful types (including literal numbers/statistics), and a three-word contiguous exact run containing at least one meaningful word. Retrieval seed three, gap at most five and global density at least 60% independently per side. Citations and enabled long quotes consume gap/span positions.",
             "denominator": DENOMINATOR_DESCRIPTION,
             "limitations": "Lexical hypotheses, not vendor parameters. No seed means no candidate. Literal numbers; no citation deletion. Ambiguous headers retained with warnings. Resource-limited search explicitly partial.",
         },

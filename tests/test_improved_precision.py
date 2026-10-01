@@ -146,8 +146,10 @@ def test_quote_outside_aligned_match_has_no_exclusion_effect():
 
 
 @pytest.mark.parametrize("word,expected", [
-    ("the", False), ("et", False), ("f", False), ("df", False), ("sd", False),
-    ("η", False), ("4.72", False), ("2020a", False), ("construal", True),
+    ("the", False), ("et", False), ("f", True), ("df", True), ("sd", True),
+    ("η", True), ("4.72", True), ("2020a", False), ("construal", True),
+    ("p", True), ("d", True), ("ci", True), ("m", True), ("0.05", True),
+    ("2005", True), ("4,72", True), ("x", False),
     ("level", True), ("levels", True), ("rna", True), ("ai", True),
 ])
 def test_frozen_literal_content_definition(word, expected):
@@ -163,25 +165,84 @@ def test_similar_requires_four_distinct_shared_content_words():
     assert compare(doc(phrase), doc(phrase + " ending"))["metrics"]["exact_words"] == 9
 
 
-def test_four_word_anchor_needs_two_not_four_content_words():
+def test_three_word_anchor_needs_one_meaningful_word():
     words = "the neural response was measured across distinct cortical regions".split()
     path = tuple((i, i + int(i >= 4) + int(i >= 7)) for i in range(9))
     assert accepts_similar(path, words, [False] * 9, [False] * 11)
     details = content_details(path, words, [False] * 9, [False] * 11)
     assert details["distinct_matched_content_words"] == 7
-    assert details["strongest_four_word_run_content_words"] == 2
-    # Four qualifying content types elsewhere cannot rescue only three-word runs.
+    assert details["strongest_three_word_run_meaningful_words"] == 3
     path = tuple((i, i + i // 3) for i in range(9))
-    assert not accepts_similar(path, words, [False] * 9, [False] * 12)
+    assert accepts_similar(path, words, [False] * 9, [False] * 12)
+    path = tuple((i, i + i // 2) for i in range(9))
+    assert not accepts_similar(path, words, [False] * 9, [False] * 14)
 
 
-def test_citations_cannot_create_an_artificial_four_word_anchor():
+def test_citations_cannot_create_an_artificial_three_word_anchor():
     words = "alpha beta smith gamma delta epsilon zeta eta theta iota".split()
     path = tuple((i, i) for i in range(10))
     mask = [i == 2 for i in range(10)]
     info = content_details(path, words, mask, mask)
     assert info["longest_exact_run"] == 7
     assert info["distinct_matched_content_words"] == 9
+
+
+def test_statistics_and_numbers_supply_meaningful_types_with_three_word_anchor():
+    target = doc("the p was alpha d and 0.05 beta CI of 2.50")
+    source = doc("the p was gamma d and 0.05 delta CI of 2.50")
+    result = compare(target, source)
+    match = result["matches"][0]
+    assert result["metrics"]["exact_words"] == 0
+    assert result["metrics"]["similar_only_words"] == 9
+    assert match["diagnostics"]["distinct_matched_content_words"] == 5
+    assert match["diagnostics"]["longest_exact_run"] == 3
+    assert match["diagnostics"]["strongest_three_word_run_meaningful_words"] == 2
+    assert match["diagnostics"]["content_policy_version"] == "literal-meaningful-types-numbers-statistics-v2"
+    assert match["diagnostics"]["seed"]["words"] == ["the", "p", "was"]
+    assert match["matched_words"] == 9
+
+
+def test_exactly_one_meaningful_word_in_only_three_word_run_qualifies():
+    words = "the p was d and ci of m to".split()
+    path = tuple((i, j) for i, j in enumerate([0, 1, 2, 4, 5, 7, 8, 10, 11]))
+    details = content_details(path, words, [False] * 9, [False] * 12)
+    assert details["distinct_matched_content_words"] == 4
+    assert details["strongest_three_word_run_meaningful_words"] == 1
+    assert accepts_similar(path, words, [False] * 9, [False] * 12)
+    # A three-word function-word seed is insufficient even with statistics later.
+    words[:3] = ["the", "of", "and"]
+    words[4] = "sd"
+    assert not accepts_similar(path, words, [False] * 9, [False] * 12)
+
+
+@pytest.mark.parametrize("phrase", ["the of and of the and the of and", "the p was d and p of d to"])
+def test_stopwords_or_fewer_than_four_meaningful_types_still_reject(phrase):
+    words = phrase.split()
+    path = tuple((i, i + int(i >= 3)) for i in range(9))
+    assert not accepts_similar(path, words, [False] * 9, [False] * 10)
+
+
+def test_different_numeric_literals_never_match_or_become_distinct_credit():
+    result = compare(doc("the p was alpha d and 0.05 beta CI of 2.50"),
+                     doc("the p was gamma d and 0.06 delta CI of 2.51"))
+    assert not result["matches"]  # Only seven actual equal words, never nine.
+    result = compare(doc("the p was alpha d and 0.05 beta CI of 0.05"),
+                     doc("the p was gamma d and 0.05 delta CI of 0.05"))
+    assert result["matches"][0]["diagnostics"]["distinct_matched_content_words"] == 4
+    assert result["matches"][0]["diagnostics"]["matched_word_count"] == 9
+
+
+@pytest.mark.parametrize("citation_side", ["target", "source", "both"])
+def test_citation_years_never_gain_numeric_meaningful_credit(citation_side):
+    cited = "(Smith 2005; Jones 2006) the p was alpha d and CI beta M of SD"
+    ordinary = "Smith 2005 Jones 2006 the p was gamma d and CI delta M of SD"
+    target = cited if citation_side != "source" else ordinary.replace("gamma", "alpha").replace("delta", "beta")
+    source = cited.replace("alpha", "gamma").replace("beta", "delta") if citation_side != "target" else ordinary
+    result = compare(doc(target), doc(source + " ending"))
+    match = next(m for m in result["matches"] if m["match_kind"] == "similar")
+    assert all(a >= 4 and b >= 4 for a, b in match["aligned_pairs"])
+    assert match["diagnostics"]["distinct_matched_content_words"] == 5
+    assert match["matched_words"] == 9
 
 
 def test_thirty_eight_duplicates_charge_one_retained_path():

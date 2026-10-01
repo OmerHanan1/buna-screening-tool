@@ -26,7 +26,7 @@ def cited_paths(m, s):
 
 def test_fragmented_v1_example_rejected_by_new_content_guard():
     result = compare("a b c d x x e f g y h i j", "a b c d q e f g r h i j")
-    assert result["algorithm_version"] == "improvedEng-v3-precision"
+    assert result["algorithm_version"] == "improvedEng-v3.1-precision"
     assert result["metrics"]["overlapping_words"] == 0
     assert result["metrics"]["similar_only_words"] == 0
 
