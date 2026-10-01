@@ -1,4 +1,4 @@
-"""Restored v1 ordered alignment with citation-only qualification correction."""
+"""Ordered alignment with opt-in improvedEng precision and original evidence."""
 from __future__ import annotations
 
 import hashlib
@@ -26,11 +26,53 @@ from buna.score_policy import (
 )
 
 MODEL_ID = "improvedEng"
-VERSION = "improvedEng-v1-citation"
+VERSION = "improvedEng-v3-precision"
 NORMALIZATION_VERSION = "nfkc-casefold-literal-numeric-document-local-hyphens-layout-v2"
 WORKING_INDEX_BYTES = 128 * 1024 * 1024
 Pair = tuple[int, int]
 Path = tuple[Pair, ...]
+CONTENT_POLICY_VERSION = "literal-content-types-stopwords-statistics-v1"
+_STOPWORDS = frozenset((
+    "a an and are as at be been being but by can could did do does done for from had has have having he her "
+    "hers him his how i if in into is it its itself may might more most must no nor not of off on once only or "
+    "other our ours out over own same she should so some such than that the their theirs them then there these "
+    "they this those through to too under until up very was we were what when where which while who whom why "
+    "will with would you your also both each few further here just via per vs al et"
+).split())
+_STATISTICS = frozenset("b d f n p r t z df sd se sem ci es η β χ μ σ ρ".split())
+
+
+def _content(word: str) -> bool:
+    return len(word) >= 2 and word.isalpha() and word not in _STOPWORDS and word not in _STATISTICS
+
+
+def content_details(path: Path, mw: list[str], m_cited: list[bool], s_cited: list[bool]) -> dict:
+    distinct = set()
+    run = []
+    longest = strongest = 0
+    previous = None
+    for a, b in path:
+        if m_cited[a] or s_cited[b]:
+            run, previous = [], None
+            continue
+        if previous is None or (a, b) != (previous[0] + 1, previous[1] + 1):
+            run = []
+        content = _content(mw[a])
+        if content:
+            distinct.add(mw[a])
+        run.append(content)
+        longest = max(longest, len(run))
+        if len(run) >= 4:
+            strongest = max(strongest, sum(run[-4:]))
+        previous = (a, b)
+    return {"distinct_matched_content_words": len(distinct), "longest_exact_run": longest,
+            "strongest_four_word_run_content_words": strongest,
+            "content_policy_version": CONTENT_POLICY_VERSION}
+
+
+def accepts_similar(path: Path, mw: list[str], m_cited: list[bool], s_cited: list[bool]) -> bool:
+    info = content_details(path, mw, m_cited, s_cited)
+    return valid(path) and info["distinct_matched_content_words"] >= 4 and info["strongest_four_word_run_content_words"] >= 2
 
 
 @dataclass(frozen=True)
@@ -420,7 +462,8 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
             for path in search(mw, sw, m_hard, s_ok, budget, m_cited=m_cited, s_cited=s_cited,
                                m_skipped=m_skipped, s_skipped=s_skipped,
                                working_bytes=WORKING_INDEX_BYTES):
-                _collect(scored_paths, path, evidence_budget, budget)
+                if accepts_similar(path, mw, m_cited, s_cited):
+                    _collect(scored_paths, path, evidence_budget, budget)
             row["scored_search_complete"] = True
             phase = "audit"
             # Audit work must not consume the rest of the budget for later sources.
@@ -431,7 +474,8 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
                 for path in search(mw, sw, [True] * len(mw), [True] * len(sw), budget,
                                    m_cited=m_cited, s_cited=s_cited, working_bytes=WORKING_INDEX_BYTES):
                     ma, mb, sa, sb = path[0][0], path[-1][0] + 1, path[0][1], path[-1][1] + 1
-                    if any(not m_ok[a] or not s_exact[b] for a, b in path):
+                    if (any(not m_ok[a] or not s_exact[b] for a, b in path)
+                            and accepts_similar(path, mw, m_cited, s_cited)):
                         _collect(audit_paths, path, audit_budget, budget)
                 try:
                     for a, e, b, f in _exact_runs(mw, [True] * len(mw), [0] * len(mw), sw, [True] * len(sw),
@@ -518,6 +562,7 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
                 match["raw_aligned_pairs"] = [[m_map[a], s_map[b]] for a, b in raw_pairs]
                 match["qualifying_aligned_pairs"] = [list(pair) for pair in original_path]
                 details = alignment_details(raw_pairs, mw, sw, m_cited, s_cited)
+                details.update(content_details(path, mw, m_cited, s_cited))
                 details.update(manuscript_span=[ma, mb], source_span=[sa, sb],
                                logical_manuscript_span=[path[0][0], path[-1][0] + 1],
                                logical_source_span=[path[0][1], path[-1][1] + 1],
@@ -615,6 +660,8 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
                 },
                 "normalization_version": NORMALIZATION_VERSION, "source_time_limit_seconds": source_seconds,
                 "layout_version": LAYOUT_VERSION,
+                "similar_content_policy": {"version": CONTENT_POLICY_VERSION, "minimum_distinct_content_words": 4,
+                                          "minimum_exact_run": 4, "minimum_content_words_in_four_word_run": 2},
                 "quotation_policy": "improvedEng: balanced quotes of at most three words ignored; longer quotes excluded individually on both sides when enabled, retaining gap/span positions",
                 "evidence_memory_policy": "live-retained-scored-priority-v1",
                 "total_time_limit_seconds": total_time_limit_seconds, "working_index_limit_mib": 128}

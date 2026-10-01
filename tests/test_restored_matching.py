@@ -24,12 +24,11 @@ def cited_paths(m, s):
                        lambda: None, m_cited=citation_mask(m, mt), s_cited=citation_mask(s, st)))
 
 
-def test_fragmented_v1_example_restored_with_actual_word_union():
+def test_fragmented_v1_example_rejected_by_new_content_guard():
     result = compare("a b c d x x e f g y h i j", "a b c d q e f g r h i j")
-    assert result["algorithm_version"] == "improvedEng-v1-citation"
-    assert result["metrics"]["overlapping_words"] == 10
-    assert result["metrics"]["similar_only_words"] == 10
-    assert result["matches"][0]["scored_word_positions"] == [0, 1, 2, 3, 6, 7, 8, 10, 11, 12]
+    assert result["algorithm_version"] == "improvedEng-v3-precision"
+    assert result["metrics"]["overlapping_words"] == 0
+    assert result["metrics"]["similar_only_words"] == 0
 
 
 def test_formulaic_language_and_literal_numbers_not_suppressed():
@@ -103,8 +102,8 @@ def test_mixed_boundary_seed_rejected_in_original_coordinates(reverse, masked_si
 
 
 def test_citation_inside_valid_match_is_diagnostic_not_scored():
-    m = "a b c d (Smith 2020) e f g h i"
-    s = "a b c d q e f g h i"
+    m = "alpha beta gamma delta (Smith 2020) epsilon zeta eta theta iota"
+    s = "alpha beta gamma delta q epsilon zeta eta theta iota"
     result = compare(m, s)
     match = next(m for m in result["matches"] if m["match_kind"] == "similar")
     assert match["matched_words"] == 9
@@ -115,7 +114,7 @@ def test_citation_inside_valid_match_is_diagnostic_not_scored():
     assert diagnostic["citation_matches"]["count"] == 0
     assert diagnostic["manuscript_density"] == 9 / 11
     assert diagnostic["manuscript_gap_sequence"] == [0, 0, 0, 2, 0, 0, 0, 0]
-    assert diagnostic["seed"]["words"] == ["a", "b", "c"]
+    assert diagnostic["seed"]["words"] == ["alpha", "beta", "gamma"]
     assert "manuscript_gap_sequence" in diagnostics_csv(result)
 
 
@@ -138,8 +137,8 @@ def test_seven_prose_plus_two_citations_exact_accepts_similar_rejects():
 
 
 def test_raw_citation_equal_pairs_never_shorten_qualifying_gaps():
-    m = "a b c d (Smith 2020) x e f g h i"
-    s = "a b c d (Smith 2020) y e f g h i"
+    m = "alpha beta gamma delta (Smith 2020) x epsilon zeta eta theta iota"
+    s = "alpha beta gamma delta (Smith 2020) y epsilon zeta eta theta iota"
     result = compare(m, s)
     match = next(item for item in result["matches"] if item["match_kind"] == "similar")
     assert len(match["qualifying_aligned_pairs"]) == 9
@@ -177,7 +176,8 @@ def test_tight_materialization_budget_keeps_partial_report_not_key_error(monkeyp
         return add(self, size)
 
     monkeypatch.setattr(engine._Evidence, "add", fail)
-    result = compare("a b c d x e f g h i", "a b c d y e f g h i")
+    result = compare("alpha beta gamma delta x epsilon zeta eta theta iota",
+                     "alpha beta gamma delta y epsilon zeta eta theta iota")
     assert result["metrics"]["truncated"]
     assert not result["matches"]
     assert result["source_coverage"][0]["status"] == "compared-with-limits"

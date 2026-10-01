@@ -76,17 +76,17 @@ def test_seed_and_minimum():
         assert result["metrics"]["score_denominator_words"] == size
 
 
-def test_restored_fragmented_islands_qualify_without_content_anchors():
+def test_fragmented_islands_without_content_are_rejected():
     m = "a b c d x x e f g y h i j"
     s = "a b c d q e f g r h i j"
     result = improved_report(document(m), [
         {"id": "z", "document": document(s)}, {"id": "a", "document": document(s + " ending")},
     ])
-    assert result["metrics"]["overlapping_words"] == 10
+    assert result["metrics"]["overlapping_words"] == 0
     assert result["metrics"]["eligible_words"] == 13
     assert result["metrics"]["exact_words"] == 0
-    assert result["matches"]
-    assert all(row["overlapping_words"] == 10 for row in result["source_coverage"])
+    assert not result["matches"]
+    assert all(row["overlapping_words"] == 0 for row in result["source_coverage"])
 
 
 def test_exact_subrun_precedence_inside_larger_similar_passage():

@@ -5,6 +5,7 @@ from buna.citation_tokens import improved_citation_mask
 from buna.classified import tokens
 from buna.documents import _structure
 from buna.improved_eng import improved_report
+from buna.improved_eng import _content, accepts_similar, content_details
 from buna.improved_layout import running_headers
 
 
@@ -139,3 +140,42 @@ def test_quote_outside_aligned_match_has_no_exclusion_effect():
     assert result["metrics"]["exact_words"] == 9
     assert result["matches"][0]["quotation"]["status"] == "not-detected"
     assert not result["matches"][0]["exclusion_reasons"]
+
+
+@pytest.mark.parametrize("word,expected", [
+    ("the", False), ("et", False), ("f", False), ("df", False), ("sd", False),
+    ("η", False), ("4.72", False), ("2020a", False), ("construal", True),
+    ("level", True), ("levels", True), ("rna", True), ("ai", True),
+])
+def test_frozen_literal_content_definition(word, expected):
+    assert _content(word) is expected
+
+
+def test_similar_requires_four_distinct_shared_content_words():
+    target = doc("the construal level of the reappraisal they implement to the construal level of the")
+    source = doc("the construal level of the explanation they apply to the construal level of the")
+    assert compare(target, source)["metrics"]["overlapping_words"] == 0
+    # Nine uninterrupted generic/statistical words remain valid Exact.
+    phrase = "the of and the of and f p 2020"
+    assert compare(doc(phrase), doc(phrase + " ending"))["metrics"]["exact_words"] == 9
+
+
+def test_four_word_anchor_needs_two_not_four_content_words():
+    words = "the neural response was measured across distinct cortical regions".split()
+    path = tuple((i, i + int(i >= 4) + int(i >= 7)) for i in range(9))
+    assert accepts_similar(path, words, [False] * 9, [False] * 11)
+    details = content_details(path, words, [False] * 9, [False] * 11)
+    assert details["distinct_matched_content_words"] == 7
+    assert details["strongest_four_word_run_content_words"] == 2
+    # Four qualifying content types elsewhere cannot rescue only three-word runs.
+    path = tuple((i, i + i // 3) for i in range(9))
+    assert not accepts_similar(path, words, [False] * 9, [False] * 12)
+
+
+def test_citations_cannot_create_an_artificial_four_word_anchor():
+    words = "alpha beta smith gamma delta epsilon zeta eta theta iota".split()
+    path = tuple((i, i) for i in range(10))
+    mask = [i == 2 for i in range(10)]
+    info = content_details(path, words, mask, mask)
+    assert info["longest_exact_run"] == 7
+    assert info["distinct_matched_content_words"] == 9
