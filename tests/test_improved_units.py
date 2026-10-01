@@ -7,7 +7,7 @@ from buna.documents import _structure
 from buna.improved_eng import _content, improved_report
 from buna.improved_tokens import tokens
 from buna.citation_tokens import apa_units, improved_citation_mask
-from buna.improved_eng import _CitationBlocks, search
+from buna.improved_eng import _CitationBlocks, _Evidence, _collect, search, trim_weak_edges
 
 
 def doc(text):
@@ -195,3 +195,47 @@ def test_full_multi_author_unit_cannot_be_replaced_by_equal_suffix():
     assert [[w for w, *_ in ledger[a:b]] for a, b in units] == [
         ["feinberg", "et", "al", "2014"], ["olatunji", "et", "al", "2017"],
     ]
+
+
+@pytest.mark.parametrize("side", ["target", "source"])
+@pytest.mark.parametrize("edge", ["prefix", "suffix"])
+@pytest.mark.parametrize("fringe", ["the", "of the", "=", "< ="])
+def test_weak_one_two_unit_padding_removed_before_nine_word_acceptance(side, edge, fringe):
+    core = "alpha beta gamma delta epsilon zeta eta theta"
+    plain = f"{fringe} {core}" if edge == "prefix" else f"{core} {fringe}"
+    gapped = f"{fringe} borrowed several unrelated words {core}" if edge == "prefix" else f"{core} borrowed several unrelated words {fringe}"
+    target, source = (gapped, plain) if side == "target" else (plain, gapped)
+    result = compare(target, source)
+    assert result["metrics"]["overlapping_words"] == 0
+    assert result["source_coverage"][0]["trimmed_edge_pair_occurrences"] >= len(tokens(fringe))
+
+
+@pytest.mark.parametrize("fringe", ["neural", "neural response", "0.05", "p", "the of and"])
+def test_meaningful_edges_and_three_stopword_run_not_trimmed(fringe):
+    core = "alpha beta gamma delta epsilon zeta eta theta"
+    result = compare(f"{fringe} {core}", f"{fringe} borrowed several unrelated words {core}")
+    assert result["metrics"]["overlapping_words"] == 8 + len(tokens(fringe))
+    assert result["source_coverage"][0]["trimmed_edge_pair_occurrences"] == 0
+
+
+def test_internal_weak_words_and_ordinary_gaps_preserved():
+    target = "alpha beta gamma x the y delta epsilon zeta eta theta"
+    source = "alpha beta gamma q the r delta epsilon zeta eta theta"
+    result = compare(target, source)
+    assert result["metrics"]["overlapping_words"] == 9
+    assert 4 in result["matches"][0]["scored_word_positions"]
+    assert result["matches"][0]["max_unmatched_run"] == 1
+
+
+def test_contiguous_exact_stopword_edges_unchanged_and_merged_padding_not_restored():
+    phrase = "the alpha beta gamma delta epsilon zeta eta theta of"
+    assert compare(phrase, phrase)["metrics"]["exact_words"] == 10
+    words = phrase.split() + ["iota", "kappa", "lambda"]
+    full = ((0, 0),) + tuple((i, i + 3) for i in range(1, len(words)))
+    first, second = full[:11], full[3:]
+    budget, paths = _Evidence(), []
+    for candidate in (first, second, first):
+        _collect(paths, candidate, budget, lambda: None,
+                 prepare=lambda p: trim_weak_edges(p, words))
+    assert all((0, 0) not in p for p in paths)
+    assert {pair for p in paths for pair in p} == set(full[1:])

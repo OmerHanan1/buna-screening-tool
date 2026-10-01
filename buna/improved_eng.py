@@ -35,6 +35,7 @@ WORKING_INDEX_BYTES = 128 * 1024 * 1024
 Pair = tuple[int, int]
 Path = tuple[Pair, ...]
 CONTENT_POLICY_VERSION = "literal-meaningful-types-numbers-statistics-v2"
+EDGE_POLICY_VERSION = "weak-one-two-unit-fringe-v1"
 _STOPWORDS = frozenset((
     "a an and are as at be been being but by can could did do does done for from had has have having he her "
     "hers him his how i if in into is it its itself may might more most must no nor not of off on once only or "
@@ -88,6 +89,29 @@ def accepts_similar(path: Path, mw: list[str], m_cited: list[bool], s_cited: lis
     cited_pairs = {p for p in path if m_cited[p[0]] or s_cited[p[1]]}
     return (valid(path) and (not cited_pairs or (blocks is not None and cited_pairs <= blocks.verified_pairs(path)))
             and info["distinct_matched_content_words"] >= 4 and info["strongest_three_word_run_meaningful_words"] >= 1)
+
+
+def trim_weak_edges(path: Path, mw: list[str], blocks=None) -> Path:
+    """Only nonmeaningful one/two-unit outer runs; never internal wording."""
+    if not path or _is_exact(path):
+        return path
+    verified = blocks.verified_pairs(path) if blocks else set()
+    left, right = 0, len(path)
+    while left < right:
+        end = left + 1
+        while end < right and path[end] == (path[end - 1][0] + 1, path[end - 1][1] + 1):
+            end += 1
+        if end - left > 2 or any(_content(mw[a]) or (a, b) in verified for a, b in path[left:end]):
+            break
+        left = end
+    while left < right:
+        start = right - 1
+        while start > left and path[start] == (path[start - 1][0] + 1, path[start - 1][1] + 1):
+            start -= 1
+        if right - start > 2 or any(_content(mw[a]) or (a, b) in verified for a, b in path[start:right]):
+            break
+        right = start
+    return path[left:right]
 
 
 @dataclass(frozen=True)
@@ -288,7 +312,7 @@ def search(mw: list[str], sw: list[str], m_ok: list[bool], s_ok: list[bool],
            check: Callable[[], None], *, working_bytes: int = WORKING_INDEX_BYTES,
            m_cited: list[bool] | None = None, s_cited: list[bool] | None = None,
            m_skipped: list[bool] | None = None, s_skipped: list[bool] | None = None,
-           citation_blocks=None) -> Iterator[Path]:
+           citation_blocks=None, prepare_path=lambda path: path) -> Iterator[Path]:
     """Pure prose seeds; optionally traverse identical complete APA atomic units."""
     m_cited = m_cited if m_cited is not None else [False] * len(mw)
     s_cited = s_cited if s_cited is not None else [False] * len(sw)
@@ -343,8 +367,15 @@ def search(mw: list[str], sw: list[str], m_ok: list[bool], s_ok: list[bool],
                         nodes.add(neighbor)
                         frontier.append(neighbor)
             for path in _paths(graph, check):
-                yield from _windows(path, check, m_cited=m_cited, s_cited=s_cited,
-                                    boundaries=blocks.boundaries if blocks else lambda first, last: True)
+                pending = [prepare_path(path)]
+                while pending:
+                    for window in _windows(pending.pop(), check, m_cited=m_cited, s_cited=s_cited,
+                                           boundaries=blocks.boundaries if blocks else lambda first, last: True):
+                        prepared = prepare_path(window)
+                        if prepared == window:
+                            yield window
+                        elif prepared:
+                            pending.append(prepared)
             seen.update(nodes)
 
 
@@ -386,9 +417,12 @@ def _envelope(path: Path):
 
 
 def _collect(paths: list[Path], candidate: Path, budget: _Evidence, check: Callable[[], None],
-             accept: Callable[[Path], bool] = valid) -> None:
+             accept: Callable[[Path], bool] = valid, prepare=lambda path: path) -> None:
     """Keep maximal pair-compatible evidence, never union unrelated envelopes."""
     check()
+    candidate = prepare(candidate)
+    if not candidate or not accept(candidate):
+        return
     for old in paths:
         check()
         if _contains(old, candidate) and (not _is_exact(candidate) or _is_exact(old)):
@@ -407,6 +441,7 @@ def _collect(paths: list[Path], candidate: Path, budget: _Evidence, check: Calla
                 continue
             union = tuple(sorted(set(old) | set(candidate)))
             if (all(a[0] < b[0] and a[1] < b[1] for a, b in zip(union, union[1:]))
+                    and prepare(union) == union
                     and (_is_exact(union) or accept(union))):
                 candidate = union
                 consumed.add(index)
@@ -510,7 +545,8 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
         row = {"source_id": sid, "status": "compared", "limits_reached": [],
                "scored_search_complete": False, "audit_search_complete": False,
                "preprint_status": "unknown", "exact_matches": 0, "similar_matches": 0,
-               "similar_qualification_rejections": {"distinct-content": 0, "three-word-anchor": 0}}
+               "similar_qualification_rejections": {"distinct-content": 0, "three-word-anchor": 0},
+               "trimmed_edge_pair_occurrences": 0}
         coverage.append(row)
         started = time.monotonic()
         remaining_sources = sum(not item.get("excluded") for _, item in ordered[number:])
@@ -593,13 +629,19 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
                 raise SearchLimit(exc.kind, exc.reason) from exc
             if m_units and s_units:
                 blocks = _CitationBlocks(mw, sw, m_units, s_units, m_ok, s_exact, None, None)
+
+            def prepare(path):
+                trimmed = trim_weak_edges(path, mw, blocks)
+                row["trimmed_edge_pair_occurrences"] += len(path) - len(trimmed)
+                return trimmed
+
             for path in search(mw, sw, m_hard, s_ok, budget, m_cited=m_cited, s_cited=s_cited,
                                m_skipped=m_skipped, s_skipped=s_skipped,
-                               citation_blocks=blocks,
+                               citation_blocks=blocks, prepare_path=prepare,
                                working_bytes=WORKING_INDEX_BYTES):
                 if accepts_similar(path, mw, m_cited, s_cited, blocks):
                     _collect(scored_paths, path, evidence_budget, budget,
-                             lambda p: accepts_similar(p, mw, m_cited, s_cited, blocks))
+                             lambda p: accepts_similar(p, mw, m_cited, s_cited, blocks), prepare)
                 else:
                     rejected = content_details(path, mw, m_cited, s_cited)
                     stage = ("distinct-content" if rejected["distinct_matched_content_words"] < 4
@@ -618,12 +660,13 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
                                              [True] * len(mw), [True] * len(sw), None, None)
                 for path in search(mw, sw, [True] * len(mw), [True] * len(sw), budget,
                                    m_cited=m_cited, s_cited=s_cited, citation_blocks=blocks,
+                                   prepare_path=prepare,
                                    working_bytes=WORKING_INDEX_BYTES):
                     ma, mb, sa, sb = path[0][0], path[-1][0] + 1, path[0][1], path[-1][1] + 1
                     if (any(not m_ok[a] or not s_exact[b] for a, b in path)
                             and accepts_similar(path, mw, m_cited, s_cited, blocks)):
                         _collect(audit_paths, path, audit_budget, budget,
-                                 lambda p: accepts_similar(p, mw, m_cited, s_cited, blocks))
+                                 lambda p: accepts_similar(p, mw, m_cited, s_cited, blocks), prepare)
                 try:
                     for a, e, b, f in _exact_runs(mw, [True] * len(mw), [0] * len(mw), sw, [True] * len(sw),
                                                 [0] * len(sw), 9, budget):
@@ -726,6 +769,7 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
                     gaps_m = [b[0] - a[0] - 1 for a, b in zip(path, path[1:])]
                     gaps_s = [b[1] - a[1] - 1 for a, b in zip(path, path[1:])]
                     details.update(
+                        edge_padding_policy=EDGE_POLICY_VERSION,
                         qualifying_matched_words=len(path),
                         manuscript_density=info["manuscript_similarity"],
                         source_density=info["source_similarity"],
@@ -842,6 +886,7 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
                 "score_basis": SCORE_BASIS, "score_policy_version": SCORE_POLICY_VERSION,
                 "eligibility_profile": ELIGIBILITY_PROFILE,
                 "word_policy_version": WORD_POLICY_VERSION,
+                "edge_padding_policy": EDGE_POLICY_VERSION,
                 "operator_policy": "Each literal =, <, > and \u2248 is one word unit for alignment/count/density/score; not meaningful content. Compound ASCII operators are separate literal units; no additional mathematical equivalences.",
                 "manuscript_scope": scope, "improved_eng_config": asdict(cfg),
                 "citation_qualification": {
