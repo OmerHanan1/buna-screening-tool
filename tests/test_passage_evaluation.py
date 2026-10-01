@@ -23,12 +23,20 @@ def gold(report, passages):
             "manuscript_ledger_sha256": report["improved_eng"]["manuscript_ledger_sha256"],
             "source_manifest": {r["source_id"]: r["source_content_sha256"] for r in report["source_coverage"]},
             "exclusions": {key: report["settings"][key] for key in
-                           ("score_policy_version", "exclude_quotes", "manuscript_scope")},
+                           ("score_policy_version", "exclude_quotes", "manuscript_scope", "eligibility_profile")},
             "passages": passages}
 
 
 def label(ma, mb, sa, sb):
     return {"source_id": "1", "word_start": ma, "word_end": mb, "source_word_start": sa, "source_word_end": sb}
+
+
+def test_evaluation_refuses_old_eligibility_profile():
+    report, _ = fixture()
+    reference = gold(report, [label(1, 39, 1, 39)])
+    reference["exclusions"].pop("eligibility_profile")
+    with pytest.raises(ValueError, match="exclusion policy"):
+        evaluate_passages(report, reference, 1)
 
 
 def test_small_boundaries_are_shared_not_complete_false_positive_negative():

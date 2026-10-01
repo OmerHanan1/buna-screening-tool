@@ -1,9 +1,32 @@
-# improvedEng: restored ordered alignment with citation qualification
+# improvedEng: ordered alignment with precision exclusions
 
 New comparisons use model ID `improvedEng`, algorithm version
-`improvedEng-v1-citation`. This restores the previous flexible ordered-alignment
-milestone rather than tuning v2. Standard remains the default; the other engines
-are unchanged. Saved v1/v2 reports retain their own rules and values.
+`improvedEng-v3-precision`. Standard remains the default; Standard 2.5.4 and
+classified-v1.1 matching and denominator behavior are unchanged. Saved reports
+retain their original rules and values; neither library caches nor historical
+reports are rewritten or replayed.
+
+## 1. Running headers and original coordinates
+
+`repeated-numbered-page-edge-v1` derives a logical token view on both documents.
+The canonical extracted text, tokens, PDF offsets and pages remain unchanged.
+Only the first/last nonempty line (or edge pair with a separate counter line)
+of a page with at least two body lines is considered.
+A short repeated identity (2–12 words, at most 120 characters) must
+occur on at least two pages with each occurrence's own page-correct numeric
+counter. Odd/even identities are learned independently. Counter normalization
+is for identification only. Ordinary headings, sentence punctuation, table-like
+lines, mismatched page numbers and unnumbered first-page titles remain intact.
+
+Extraction currently supplies no geometric line positions. Ambiguous unnumbered
+repeated edge text is **retained with a warning**, not guessed away. This
+conservative fallback cannot recognize every real running header.
+
+Confirmed header words are absent from logical alignment and consume zero gap.
+Body words on either side of a removed header can align contiguously. Every
+published pair, character span and score position maps back to the original
+ledger; no header rectangle is included in a merged highlight. The normalization
+version changes to `nfkc-casefold-literal-numeric-document-local-hyphens-layout-v2`.
 
 ## Retained evidence and scoring priority
 
@@ -22,7 +45,7 @@ still produces partial coverage and a lower-bound score. JSON records separate
 scored/audit limits, current reservations, peaks and failure reasons. This changes
 resource accounting, not matching thresholds, eligible words or accepted evidence.
 
-## Restored matching rules
+## Matching rules
 
 Similar matching again uses overlapping exact **three-word retrieval seeds**,
 ordered one-to-one equal-word alignments, at least **nine qualifying matched
@@ -31,28 +54,32 @@ global density of at least **60% independently per side**.
 
 Seeds retrieve candidates; they do not qualify a reportable passage.
 Alternative paths and valid inner passages are retained, not just one greedy
-or maximum-score path. Exclusions remain hard boundaries. Numerator masks use
+or maximum-score path. Front matter and bibliography remain hard boundaries.
+Long quotations instead consume gap/span positions when enabled. Numerator masks use
 only actual matched manuscript positions and union them across evidence/sources.
 Numbers remain literal normalized tokens. There is no semantic model, embedding,
 hidden span/diagonal band, top-K, beam limit or sentence cutoff.
 
-The v2 four-content-word anchor, every-window density, cumulative-gap limit,
-informative-word requirement and generic/academic-language suppression are
-removed from the implementation. Formulaic Methods/Results wording can match.
-The acceptance thresholds above are frozen until actual B/C/D diagnostics are
-reviewed. No parameter is tuned toward a 13% aggregate score.
+The earlier v2 every-window density, cumulative-gap limit, all-four-content-word
+anchor and global generic-language suppression are **not** restored. There is
+no tuning toward an aggregate score.
 
-## The sole Similar precision correction: citations
+## 2. APA citation qualification
 
 Explicit bracketed numeric and author-year/narrative citation syntax is masked
 in the **original word ledger**. It is not deleted or compacted. Recognition
 is syntactic, not a guess about every surname or year in prose.
+`apa-author-year-original-offsets-v2` recognizes parenthetical semicolon lists,
+multiline author-year forms, initials, multiple authors with `&`/`and`, narrative
+`Smith (2005)` / `Smith et al. (2005)`, and running `Smith et al., 2005` text.
+Bare years, statistical parentheses, definitions and standalone `et al.` without
+an author do not become citation spans. This recognizer is opt-in for improvedEng.
 
-A valid seed contains three consecutive equal **non-citation** words at their
-original positions on both sides. Mixed citation/prose and citation-only seeds
+A valid seed contains three consecutive equal **non-citation eligible** words at
+header-cleaned positions on both sides. Mixed citation/prose and citation-only seeds
 are rejected, including at passage boundaries. Citations are not removed to
 create artificial three-word adjacency. Function words and literal numbers in
-ordinary prose remain eligible; this is not a content-word strength requirement.
+ordinary prose remain eligible for retrieval.
 
 Every accepted Similar alignment must independently contain nine equal
 non-citation word pairs. Citation tokens on either side cannot increase the
@@ -70,12 +97,68 @@ citation pairs aligned inside already accepted gaps for diagnostics only.
 All Similar gaps and density numerators use only qualifying non-citation pairs,
 never these extra raw pairs. Raw diagnostic pairing cannot rescue a failed match.
 
-**Exact matching is unchanged**, including its treatment of citation text inside
-contiguous exact runs of at least nine normalized words. Exact diagnostic rows
+**Exact citation credit is unchanged** inside contiguous eligible runs of at
+least nine normalized words, after header removal. Exact diagnostic rows
 explicitly identify this exception: seven prose words plus two contiguous equal
 citation words qualify as nine Exact words, but not nine Similar words.
 The citation correction applies to Similar,
 not a silent modification of the independent Exact path.
+
+## 4. Individual quotation exclusion
+
+Balanced quotes containing at most three tokenizer words are ignored for
+exclusion, including single/double/curly/nested technical names. A long outer
+quote still includes its nested short quotes. Unbalanced delimiters do not
+exclude the rest of the document. The existing parser's explicit blockquote
+syntax is retained.
+
+With quotation exclusion on, longer recognized quotes on **both documents**
+cannot seed, score or count toward the nine-word/density numerator. Their
+positions remain in alignment: five quoted words consume a five-word gap, six
+break a path. Eight eligible words plus any excluded quote still cannot qualify;
+a full path with additional eligible words may qualify under the unchanged
+global density rule. Attribution intersects actual matched positions, not the
+surrounding context sentence. Original source excerpts are not rewritten.
+With exclusion off, all quotation words are eligible (normal APA rules still
+apply). Header/front/bibliography/long-quote denominator overlaps count once.
+
+## 3. Similar content and contiguous-run acceptance
+
+In addition to the three/nine/five/60% retrieval policy, a Similar path needs
+**four distinct shared matched content words**, plus a **four-word contiguous
+equal run containing at least two content words**. Contiguity is required on
+both header-cleaned streams, never after stripping citations or quotes.
+The guard never applies to Exact, even generic scientific wording or numbers.
+
+`literal-content-types-stopwords-statistics-v1` is frozen in `improved_eng.py`:
+an alphabetic normalized token of at least two characters is content unless in
+the explicit function-word set or statistics-symbol set
+`b d f n p r t z df sd se sem ci es η β χ μ σ ρ`.
+Numeric/mixed alphanumeric tokens and citation tokens are not content. There
+is no stemming: `level` and `levels` are different normalized lexical types.
+Unmatched context words cannot satisfy either requirement.
+
+## 5. Evidence consolidation
+
+Identical paths are discarded before reservation. Overlapping compatible paths
+are unioned only when they share an actual aligned pair and the union remains
+one-to-one, ordered and accepted under the complete rules. There is no gap
+filling, joining independent source occurrences or silent loss of equal pairs.
+Exact subruns retain independent precedence regardless of collection order.
+
+Before string/JSON materialization, same-source/same-target-span/same-source-span
+paths share one record. Incompatible paths retain their compact original-ledger
+pair lists in `alternative_alignments`; `aligned_pairs` is the deterministic
+longest representative, not a fabricated union alignment. `scored_word_positions`
+and equal highlight spans union the actual alternatives. Every alternative was
+accepted independently. Distinct source occurrences and other source IDs remain
+separate evidence; the reader's existing target-passage groups navigate source
+locations rather than rendering repeated cards.
+
+`match_records`, `alignment_alternatives`, `distinct_target_match_spans` and
+`overlapping_words` distinguish records, paths, spans and unique scored word
+positions. Raw audit evidence uses the same consolidation and its separate
+budget. No top-K or source-coverage reduction is introduced.
 
 ## Diagnostics and source completion
 
@@ -86,6 +169,11 @@ Each scored or raw excluded alignment records:
 * The actual three-word retrieval seed and its original pairs.
 * Density on each side and each side's complete gap sequence.
 * Citation pairs in the alignment and citation tokens inside each span.
+* Header and quote counts, local eligible words, distinct matched content types,
+  four-word anchor strength, alternative count and original/logical spans.
+
+Per-source rejection counters identify the distinct-content or four-word-anchor
+qualification stage without storing rejected candidate text.
 
 Similarity diagnostics remain downloadable as JSON/CSV through the existing
 report ownership gate. Exact alignments also have diagnostic objects for
@@ -102,10 +190,11 @@ that source stays partial; not-visited words are not labeled unmatched.
 Evidence/diagnostic memory exhaustion preserves a valid partial report rather
 than looking up a missing diagnostic entry and losing the report.
 
-The shared `eligible-manuscript-v1` denominator remains unchanged. Unmatched
-eligible words, citation words and words in rejected small matches still count.
-Front matter, bibliography and enabled quotation exclusions are counted once.
-Excluded/unavailable sources do not remove manuscript denominator words.
+The shared `eligible-manuscript-v1` **arithmetic** remains unchanged. The explicit
+new `eligibility_profile: improvedEng-layout-longquotes-v1` records this model's
+header/short-quote/long-quote masks without changing other models. Unmatched
+eligible words, citations and rejected small matches still count.
+Excluded/unavailable sources never remove manuscript denominator words.
 
 ## Source-linked A/B/C/D evaluation
 
@@ -125,7 +214,9 @@ python -m buna.span_evaluation report.json gold.json passage-agreement.json \
 * `annotation_complete: true`.
 * `manuscript_ledger_sha256` matching the actual labeled manuscript.
 * `source_manifest`: source ID to extracted-text SHA-256.
-* `exclusions`: saved `score_policy_version`, `exclude_quotes`, `manuscript_scope`.
+* `exclusions`: saved `score_policy_version`, `exclude_quotes`, `manuscript_scope`,
+  and `eligibility_profile` when present. Labels from an old profile cannot
+  silently calibrate the new one.
 * `passages`: records with `source_id`, `word_start`, `word_end`,
   `source_word_start`, `source_word_end`, all half-open original-ledger bounds.
 

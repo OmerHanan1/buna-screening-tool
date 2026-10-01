@@ -187,6 +187,11 @@ def test_similar_diagnostics_csv_uses_same_ownership_and_saved_evidence(tmp_path
 
     def diagnostic_worker(folder, uid):
         worker(folder, uid)
+        summary = json.loads((folder / "complete.json").read_text())
+        summary.update(algorithm_version="improvedEng-v3-precision",
+                       eligibility_profile="improvedEng-layout-longquotes-v1",
+                       word_accounting={"header_removed_words": 8})
+        (folder / "complete.json").write_text(json.dumps(summary))
         (folder / "report.json").write_text(json.dumps({"improved_eng": {
             "similar_diagnostics": [{"source": "1", "anchor_length": 4, "matched_word_count": 10,
                                     "reason_match_terminated": ["local-density"]}]}}))
@@ -203,6 +208,10 @@ def test_similar_diagnostics_csv_uses_same_ownership_and_saved_evidence(tmp_path
             if client.get(path, headers=owner).json()["status"] == "complete":
                 break
             time.sleep(.01)
+        saved = client.get(path, headers=owner).json()
+        assert saved["algorithm_version"] == "improvedEng-v3-precision"
+        assert saved["eligibility_profile"] == "improvedEng-layout-longquotes-v1"
+        assert saved["word_accounting"]["header_removed_words"] == 8
         csv = client.get(path + "/report.csv", headers=owner)
         assert csv.status_code == 200 and csv.headers["content-type"].startswith("text/csv")
         assert "anchor_length" in csv.text and "local-density" in csv.text

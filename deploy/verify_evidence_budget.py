@@ -3,6 +3,7 @@ import argparse
 import json
 from pathlib import Path
 import resource
+import sys
 import tempfile
 import time
 
@@ -53,7 +54,7 @@ def verify(count=61, expect_complete=True):
              "memory": result["improved_eng"].get("evidence_memory"),
              "report_json_bytes": report_bytes, "pdf_bytes": pdf_bytes, "summary_pages": mapping["summary_pages"],
              "seconds": round(time.monotonic() - started, 2),
-             "peak_rss_mib": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024}
+             "peak_rss_mib": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1024 * 1024 if sys.platform == "darwin" else 1024)}
     print(json.dumps(proof), flush=True)
     return proof
 

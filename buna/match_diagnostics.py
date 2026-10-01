@@ -11,6 +11,10 @@ FIELDS = [
     "local_minimum_density", "global_density", "citation_token_contribution", "reason_match_terminated", "scored",
     "matched_non_citation_words", "seed", "manuscript_density", "source_density",
     "manuscript_gap_sequence", "source_gap_sequence", "citation_matches", "citation_tokens_inside_span",
+    "header_removed_words", "source_header_removed_words", "matched_quoted_words",
+    "quotation_tokens_inside_span", "source_matched_quoted_words", "source_quotation_tokens_inside_span",
+    "local_eligible_words", "distinct_matched_content_words", "strongest_four_word_run_content_words",
+    "content_policy_version", "alignment_alternative_count", "unique_target_matched_words",
 ]
 
 

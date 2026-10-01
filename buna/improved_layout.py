@@ -27,7 +27,12 @@ def running_headers(document, ledger):
             local += len(line)
         # At least two body lines prevents single-line page content being removed.
         if len(lines) >= 3:
-            for edge, (start, end, line) in (("top", lines[0]), ("bottom", lines[-1])):
+            candidates = [("top", lines[0]), ("bottom", lines[-1])]
+            if len(lines) >= 4:
+                for edge, pair in (("top", lines[:2]), ("bottom", lines[-2:])):
+                    if any(item[2].isdigit() for item in pair):
+                        candidates.append((edge, (pair[0][0], pair[1][1], " ".join(item[2] for item in pair))))
+            for edge, (start, end, line) in candidates:
                 numbered = re.fullmatch(r"(?:(\d{1,3})\s+)?(.+?)(?:\s+(\d{1,3}))?", line)
                 if not numbered:
                     continue
@@ -45,12 +50,18 @@ def running_headers(document, ledger):
     for occurrences in groups.values():
         if len(occurrences) < 2:
             continue
-        numbered = [item for item in occurrences if item[3]]
-        if len(numbered) >= 2:
+        numbered_pages = {item[0] for item in occurrences if item[3]}
+        if len(numbered_pages) >= 2:
             # Only confirmed occurrences; do not strip the first-page title.
             removed.extend((start, end) for _, start, end, confirmed in occurrences if confirmed)
         else:
             ambiguous = True
     warnings = (["Ambiguous repeated page-edge text retained: extraction has no geometry and no repeated page-correct counter."]
                 if ambiguous else [])
-    return _mask(ledger, sorted(removed)), warnings
+    merged = []
+    for start, end in sorted(removed):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = merged[-1][0], max(end, merged[-1][1])
+        else:
+            merged.append((start, end))
+    return _mask(ledger, merged), warnings

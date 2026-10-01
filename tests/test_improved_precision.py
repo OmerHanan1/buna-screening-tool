@@ -69,7 +69,8 @@ def test_ambiguous_unnumbered_prose_headings_and_first_page_title_retained():
     "(Smith & Jones, 2020a;\nBrown et al., 2021)",
     "Smith (2005)", "Smith et al. (2005)", "Smith and Jones (2005)",
     "(J. R. Smith & K. Jones, 2005)", "(Smith, J. R., & Jones, K., 2005)",
-    "(Smith 2005)", "(Smith, 2005a, b)", "[1, 2-4]",
+    "(Smith 2005)", "(Smith, 2005a, b)", "Smith (2005, 2006b)",
+    "(van Dijk & de la Cruz, 2005)", "[1, 2-4]",
 ])
 def test_complete_apa_author_spans(citation):
     ledger = tokens(citation)
@@ -236,3 +237,120 @@ def test_same_envelope_alternatives_materialize_once_without_losing_pairs(monkey
         actual.update(map(tuple, alternative))
     assert actual == set(first) | set(second)
     assert match["scored_word_positions"] == sorted({a for a, _ in actual})
+
+
+@pytest.mark.parametrize("number_first", [True, False])
+def test_separate_header_counter_line(number_first):
+    pages = []
+    for page in (1, 2):
+        header = f"{page}\nREPEATED RUNNING HEADER" if number_first else f"REPEATED RUNNING HEADER\n{page}"
+        pages.append(header + "\nalpha beta gamma delta\nother body words")
+    target = doc(*pages)
+    mask, _ = running_headers(target, tokens(target["text"]))
+    assert sum(mask) == 8
+
+
+def test_real_pdf_header_glyphs_never_highlighted(tmp_path):
+    import hashlib
+    import pymupdf
+    from buna.documents import extract_document
+    from buna.pdf_reports import generate_pdf
+    original, output = tmp_path / "original.pdf", tmp_path / "report.pdf"
+    body = [("alpha beta gamma delta", "epsilon zeta eta"),
+            ("theta iota kappa lambda", "mu nu xi")]
+    with pymupdf.open() as pdf:
+        for index, lines in enumerate(body, 1):
+            page = pdf.new_page()
+            page.insert_text((60, 40), f"REPEATED RUNNING HEADER {index}")
+            page.insert_text((60, 100), lines[0])
+            page.insert_text((60, 120), lines[1])
+        pdf.save(original)
+    target = extract_document(original)
+    result = compare(target, doc(" ".join(line for lines in body for line in lines) + " ending"))
+    assert result["metrics"]["exact_words"] == 14
+    result["papers"] = [{"id": "s", "source_number": 1, "title": "Synthetic", "status": "compared"}]
+    mapping = generate_pdf({"original": str(original), "report": result, "job": {
+        "filename": "original.pdf", "document": target,
+        "manuscript_sha256": hashlib.sha256(original.read_bytes()).hexdigest()}}, output)
+    assert mapping["unmapped_regions"] == 0
+    with pymupdf.open(output) as pdf:
+        for page in list(pdf)[mapping["summary_pages"]:]:
+            rectangles = []
+            for annotation in page.annots() or []:
+                if annotation.type[1] == "Highlight":
+                    vertices = annotation.vertices
+                    rectangles.extend(pymupdf.Quad(vertices[i:i + 4]).rect for i in range(0, len(vertices), 4))
+            assert rectangles
+            for x0, y0, x1, y1, word, *_ in page.get_text("words"):
+                if x0 < 50:  # Native E/S source margin label, not a document word.
+                    continue
+                marked = any(rect.intersects(pymupdf.Rect(x0, y0, x1, y1)) for rect in rectangles)
+                assert marked == (y0 > 60), word
+
+
+def test_exclusion_union_and_source_order_are_stable():
+    phrase = 'alpha beta gamma delta "quoted long material here" epsilon zeta eta theta iota'
+    target = doc("REPEATED HEADER 1\ncover text\nAbstract\n" + phrase,
+                 "REPEATED HEADER 2\nReferences\n" + phrase)
+    source = doc(phrase + " ending")
+    sources = [{"id": sid, "source_number": number, "document": source}
+               for number, sid in enumerate(("a", "b"), 1)]
+    first = improved_report(target, sources)
+    second = improved_report(target, list(reversed(sources)))
+    assert first["metrics"] == second["metrics"]
+    assert first["matches"] == second["matches"]
+    metrics = first["metrics"]
+    assert metrics["score_denominator_words"] == 10  # Abstract plus nine prose.
+    assert metrics["overlapping_words"] == 9
+    assert sum(metrics[key] for key in ("front_matter_words", "excluded_bibliography_words",
+                                       "excluded_quotation_words", "other_excluded_manuscript_words",
+                                       "eligible_words")) == metrics["total_words"]
+
+
+def test_repeated_occurrences_group_in_reader_without_losing_sources():
+    from buna.presentation import manuscript_reader
+    phrase = "alpha beta gamma delta epsilon zeta eta theta iota"
+    sources = [{"id": sid, "source_number": number, "document": doc(
+        phrase + " unrelated " * 6 + phrase)} for number, sid in enumerate(("a", "b"), 1)]
+    result = improved_report(doc(phrase), sources, manuscript_scope="whole-document")
+    result["papers"] = sources
+    reader = manuscript_reader(result)
+    assert len(result["matches"]) == 4  # Two true locations in each of two papers.
+    assert len(reader["groups"]) == 1
+    assert len(reader["groups"][0]["match_indices"]) == 4
+    assert result["metrics"]["overlapping_words"] == 9
+
+
+def test_reference_probe_uses_saved_header_and_quote_profile():
+    from buna.span_evaluation import _reference_probe
+    target = doc("REPEATED HEADER 1\nalpha beta gamma delta\nother prose",
+                 'REPEATED HEADER 2\nepsilon zeta "four quoted words here"\neta theta iota')
+    source = doc("alpha beta gamma delta other prose epsilon zeta eta theta iota ending")
+    result = compare(target, source)
+    eligible = {i for item in result["classification"]["coverage_intervals"]
+                if not item["state"].startswith("excluded")
+                for i in range(item["word_start"], item["word_end"])}
+    probe = _reference_probe(result, {"source_id": "s", "word_start": 0,
+                                     "word_end": len(tokens(target["text"])),
+                                     "source_word_start": 0, "source_word_end": 11}, {"s": source}, eligible)
+    assert probe["matched_non_citation_words"] == 11
+    assert probe["maximum_gap"] == 4
+    assert probe["contains_excluded_gap_tokens"]
+    assert not probe["crosses_exclusion_boundary"]
+    assert probe["seed"]["aligned_pairs"][0] == [3, 0]
+
+
+def test_citation_and_short_quote_recognition_after_logical_header_removal():
+    from buna.improved_eng import _long_quotes
+    target = doc("REPEATED HEADER 1\nbody words\nSmith et",
+                 "REPEATED HEADER 2\nal. (2005)\nlast body words")
+    ledger = tokens(target["text"])
+    headers, _ = running_headers(target, ledger)
+    mask = improved_citation_mask(target["text"], ledger, headers)
+    assert [word for (word, *_), cited in zip(ledger, mask) if cited] == ["smith", "et", "al", "2005"]
+    target = doc('REPEATED HEADER 1\nbody words\n"one',
+                 'REPEATED HEADER 2\ntwo three"\nlast body words')
+    ledger = tokens(target["text"])
+    headers, _ = running_headers(target, ledger)
+    quoted, _ = _long_quotes(target["text"], ledger, headers)
+    assert not any(quoted)

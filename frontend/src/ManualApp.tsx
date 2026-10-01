@@ -212,7 +212,7 @@ export default function ManualApp() {
             <option value="improvedEng">improvedEng · ordered lexical matching (experimental)</option>
           </select></label>
           {comparisonModel !== "validated-lexical" && <p className="app-error">Experimental: increased recall has not established precision. This is not a validated vendor-equivalent model.</p>}
-          {comparisonModel === "improvedEng" && <p>Exact matching unchanged. Similar: restored three-word retrieval seeds, nine non-citation matches, gaps up to five and global density at least 60% per side. Citations retain their original gap/span positions but cannot qualify. No generic-language or local-density suppression.</p>}
+          {comparisonModel === "improvedEng" && <p>Similar: three-word retrieval seeds, nine eligible non-citation matches, four distinct content words and a four-word exact run with two content words. Gaps up to five and global density at least 60% per side. Confirmed headers are removed logically; citations and long quotes consume gaps. Quotes of at most three words remain eligible. Exact retains contiguous citation credit. No local-density suppression.</p>}
           <p className="muted">Algorithm {engineVersion || "unavailable"} · Nine-word configured minimum · Eligible manuscript words after exclusions.
             Manuscript limits: 20 MiB, 250 pages, 1 million extracted characters. Comparison sources: 32 MiB, 600 pages, 2 million characters. Matching remains bounded to 120 seconds/source and 64 MiB estimated retained evidence; large sources may be partially checked.
             Scanned PDFs need OCR before upload.</p>

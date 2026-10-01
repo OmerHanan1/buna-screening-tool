@@ -5,6 +5,7 @@ import hashlib
 import math
 import time
 from collections import defaultdict
+from bisect import bisect_left, bisect_right
 from dataclasses import asdict, dataclass
 from typing import Callable, Iterator
 from buna.citation_tokens import APA_VERSION, improved_citation_mask as citation_mask
@@ -22,7 +23,7 @@ from buna.comparison import (
 )
 from buna.documents import SOURCE_MAX_CHARACTERS, abstract_start
 from buna.score_policy import (
-    DENOMINATOR_DESCRIPTION, SCORE_BASIS, SCORE_POLICY_VERSION, manuscript_word_accounting,
+    SCORE_BASIS, SCORE_POLICY_VERSION, manuscript_word_accounting,
 )
 
 MODEL_ID = "improvedEng"
@@ -40,6 +41,13 @@ _STOPWORDS = frozenset((
     "will with would you your also both each few further here just via per vs al et"
 ).split())
 _STATISTICS = frozenset("b d f n p r t z df sd se sem ci es η β χ μ σ ρ".split())
+ELIGIBILITY_PROFILE = "improvedEng-layout-longquotes-v1"
+DENOMINATOR_DESCRIPTION = (
+    "Unique original manuscript word positions excluding confirmed running headers, front matter before the recognized "
+    "Abstract, bibliography, and balanced quotations longer than three words when enabled. Overlapping exclusions count "
+    "once. Short quotations, citations and unmatched eligible words remain in the denominator. Source exclusions never "
+    "remove manuscript denominator words. This is an application policy, not verified vendor arithmetic."
+)
 
 
 def _content(word: str) -> bool:
@@ -86,7 +94,7 @@ class Config:
     def __post_init__(self):
         if (self.anchor_size != 3 or self.min_matched_words != 9 or self.max_gap != 5
                 or self.min_region_similarity != 0.60 or self.max_total_span is not None):
-            raise ValueError("Restored improvedEng uses the fixed 3/9/5/0.60 profile with no span cap.")
+            raise ValueError("improvedEng uses the fixed 3/9/5/0.60 retrieval profile with no span cap.")
 
 
 class SearchLimit(Exception):
@@ -332,12 +340,19 @@ def _collect(paths: list[Path], candidate: Path, budget: _Evidence, check: Calla
     paths.append(candidate)
 
 
-def _long_quotes(text, ledger):
+def _long_quotes(text, ledger, headers=None):
     recognized, uncertain = _quotation_intervals(text)
-    # Count actual tokenizer units, not whitespace or punctuation. Nested quoted
-    # names inside a long outer quote remain part of that outer quotation.
-    long_intervals = [(a, b) for a, b in recognized if len(tokens(text[a:b])) > 3]
-    return _mask(ledger, long_intervals), _mask(ledger, sorted(uncertain))
+    headers = headers if headers is not None else [False] * len(ledger)
+    starts, ends = [t[1] for t in ledger], [t[2] for t in ledger]
+    prefix = [0]
+    for header in headers:
+        prefix.append(prefix[-1] + int(not header))
+    # Count the established ledger, including its hyphen joins, after removal
+    # of layout artifacts. A nested short quote stays inside its long outer quote.
+    long_intervals = [(a, b) for a, b in recognized
+                      if prefix[bisect_left(starts, b)] - prefix[bisect_right(ends, a)] > 3]
+    mask = _mask(ledger, long_intervals)
+    return [q and not h for q, h in zip(mask, headers)], _mask(ledger, sorted(uncertain))
 
 
 def improved_report(manuscript: dict, sources: list[dict], *, config: dict | None = None,
@@ -369,10 +384,10 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
     headers, layout_warnings = running_headers(manuscript, mt)
     m_map = [i for i in range(len(mt)) if not headers[i]]
     mw = [mt[i][0] for i in m_map]
-    original_cited = citation_mask(text, mt)
+    original_cited = citation_mask(text, mt, headers)
     m_cited = [original_cited[i] for i in m_map]
     bib = _mask(mt, _intervals(manuscript))
-    quoted, uncertain = _long_quotes(text, mt)
+    quoted, uncertain = _long_quotes(text, mt, headers)
     front = [False] * len(mt)
     scope = {"requested": manuscript_scope, "applied": "whole-document", "start_offset": None,
              "start_page": None, "heading_text": None}
@@ -405,7 +420,8 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
         sid = str(source.get("id", f"source-{original_index + 1}"))
         row = {"source_id": sid, "status": "compared", "limits_reached": [],
                "scored_search_complete": False, "audit_search_complete": False,
-               "preprint_status": "unknown", "exact_matches": 0, "similar_matches": 0}
+               "preprint_status": "unknown", "exact_matches": 0, "similar_matches": 0,
+               "similar_qualification_rejections": {"distinct-content": 0, "four-word-anchor": 0}}
         coverage.append(row)
         started = time.monotonic()
         remaining_sources = sum(not item.get("excluded") for _, item in ordered[number:])
@@ -462,12 +478,13 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
             s_map = [i for i in range(len(st)) if not s_headers[i]]
             sw = [st[i][0] for i in s_map]
             row.update(source_total_words=len(st), header_removed_words=sum(s_headers))
-            source_cited = citation_mask(document["text"], st)
+            source_cited = citation_mask(document["text"], st, s_headers)
             s_cited = [source_cited[i] for i in s_map]
+            row["citation_recognized_words"] = sum(s_cited)
             row["source_content_sha256"] = hashlib.sha256(document["text"].encode()).hexdigest()
             s_bib = _mask(st, _intervals(document))
             s_ok = [not s_bib[i] for i in s_map]
-            s_quoted, _ = _long_quotes(document["text"], st)
+            s_quoted, _ = _long_quotes(document["text"], st, s_headers)
             s_skipped = [exclude_quotes and s_quoted[i] for i in s_map]
             s_exact = [ok and not q for ok, q in zip(s_ok, s_skipped)]
             if sw == mw:
@@ -489,6 +506,11 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
                 if accepts_similar(path, mw, m_cited, s_cited):
                     _collect(scored_paths, path, evidence_budget, budget,
                              lambda p: accepts_similar(p, mw, m_cited, s_cited))
+                else:
+                    rejected = content_details(path, mw, m_cited, s_cited)
+                    stage = ("distinct-content" if rejected["distinct_matched_content_words"] < 4
+                             else "four-word-anchor")
+                    row["similar_qualification_rejections"][stage] += 1
             row["scored_search_complete"] = True
             phase = "audit"
             # Audit work must not consume the rest of the budget for later sources.
@@ -668,7 +690,9 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
                        score_denominator_words=denominator, eligible_words=denominator,
                        exact_percent=pct(n_exact), similar_only_percent=pct(n_similar), overlap_percent=pct(n_exact + n_similar))
     metrics = {
-        **accounting, "header_removed_words": sum(headers), "overlapping_words": len(covered), "overlap_percent": pct(len(covered)),
+        **accounting, "eligibility_profile": ELIGIBILITY_PROFILE,
+        "header_removed_words": sum(headers), "citation_recognized_words": sum(m_cited),
+        "overlapping_words": len(covered), "overlap_percent": pct(len(covered)),
         "exact_words": len(all_exact), "similar_only_words": len(all_similar),
         "combined_words": len(covered), "combined_percent": pct(len(covered)),
         "exact_percent": pct(len(all_exact)), "similar_only_percent": pct(len(all_similar)),
@@ -692,19 +716,21 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
     matches.sort(key=lambda m: (m["manuscript"]["match_start"], m["source_id"], m["source"]["match_start"], m["aligned_pairs"]))
     settings = {"minimum_matched_words": 9, "exclude_bibliography": True, "exclude_quotes": exclude_quotes,
                 "score_basis": SCORE_BASIS, "score_policy_version": SCORE_POLICY_VERSION,
+                "eligibility_profile": ELIGIBILITY_PROFILE,
                 "manuscript_scope": scope, "improved_eng_config": asdict(cfg),
                 "citation_qualification": {
                     "recognizer_version": APA_VERSION,
                     "scope": "Similar only; Exact unchanged",
-                    "seed": "Three consecutive equal noncitation words at original positions on both sides",
+                    "seed": "Three consecutive equal noncitation eligible words at header-cleaned positions on both sides",
                     "minimum_and_density_numerator": "Noncitation equal pairs only",
-                    "gap_and_span_accounting": "Original word positions, including intervening citations",
+                    "gap_and_span_accounting": "Header-cleaned positions; citations and long quotes retain intervening gap/span positions",
                 },
                 "normalization_version": NORMALIZATION_VERSION, "source_time_limit_seconds": source_seconds,
                 "layout_version": LAYOUT_VERSION,
                 "similar_content_policy": {"version": CONTENT_POLICY_VERSION, "minimum_distinct_content_words": 4,
                                           "minimum_exact_run": 4, "minimum_content_words_in_four_word_run": 2},
                 "quotation_policy": "improvedEng: balanced quotes of at most three words ignored; longer quotes excluded individually on both sides when enabled, retaining gap/span positions",
+                "evidence_deduplication": "One source/target-span/source-span record; compatible shared-pair unions revalidated, incompatible same-span alignments retained as compact alternative_alignments; Exact subruns preserved",
                 "evidence_memory_policy": "live-retained-scored-priority-v1",
                 "total_time_limit_seconds": total_time_limit_seconds, "working_index_limit_mib": 128}
     return {
@@ -733,12 +759,12 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
                          "audit_complete": bool(coverage) and all(
                              r["audit_search_complete"] or r["status"] in {"excluded-by-user", "excluded-identical"}
                              for r in coverage),
-                         "search": "Restored v1 three-word-seeded ordered alternatives; citations retain coordinates but cannot qualify Similar pairs."},
+                         "search": "Three-word-seeded ordered alternatives; four distinct content words and a contiguous four-word run with two content words required for Similar only. Headers removed logically; citations and long quotes retain gap positions."},
         "methodology": {
             "name": MODEL_ID, "version": VERSION, "normalization": NORMALIZATION_VERSION,
-            "exact": "Contiguous equal normalized word units, at least nine.",
-            "similar": "At least nine noncitation equal words, exact three-word retrieval seed, gap at most five per side and global density at least 60% per side; citation positions remain in gap/span denominators.",
+            "exact": "At least nine contiguous equal eligible normalized words after header removal; contiguous citations retain Exact credit; short quotes remain eligible.",
+            "similar": "At least nine eligible noncitation equal words, four distinct content types, and a four-word contiguous exact run containing at least two content words. Retrieval seed three, gap at most five and global density at least 60% independently per side. Citations and enabled long quotes consume gap/span positions.",
             "denominator": DENOMINATOR_DESCRIPTION,
-            "limitations": "Lexical hypotheses, not vendor parameters. No seed means no candidate. Literal numbers; no citation removal. Resource-limited search is explicitly partial.",
+            "limitations": "Lexical hypotheses, not vendor parameters. No seed means no candidate. Literal numbers; no citation deletion. Ambiguous headers retained with warnings. Resource-limited search explicitly partial.",
         },
     }

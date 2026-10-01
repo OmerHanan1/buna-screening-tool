@@ -2,6 +2,7 @@
 import argparse
 import hashlib
 import json
+from bisect import bisect_left
 from pathlib import Path
 
 
@@ -46,6 +47,8 @@ def evaluate(report, gold, expected_source_count=61):
         raise ValueError("Source content/version manifest differs from the labeled comparison corpus.")
     settings = report["settings"]
     exclusions = {key: settings[key] for key in ("score_policy_version", "exclude_quotes", "manuscript_scope")}
+    if "eligibility_profile" in settings:
+        exclusions["eligibility_profile"] = settings["eligibility_profile"]
     if exclusions != gold.get("exclusions"):
         raise ValueError("Gold exclusion policy/scope differs from the detector.")
     total = report["metrics"]["total_words"]
@@ -113,6 +116,31 @@ def _reference_probe(report, reference, documents, eligible):
         return {"status": "unavailable", "reason": "Diagnostic alignment exceeds its explicit 200,000-cell work bound; narrow the labeled passage."}
     mc, sc = citation_mask(manuscript, mt), citation_mask(source["text"], st)
     excluded_source = _mask(st, _intervals(source))
+    hard_target, hard_source = set(range(len(mt))) - eligible, excluded_source
+    m_map, s_map = list(range(len(mt))), list(range(len(st)))
+    if report["settings"].get("eligibility_profile") == "improvedEng-layout-longquotes-v1":
+        from buna.citation_tokens import improved_citation_mask
+        from buna.improved_layout import running_headers
+        from buna.improved_eng import _long_quotes
+        mh, _ = running_headers({"text": manuscript, "pages": report["manuscript_pages"]}, mt)
+        sh, _ = running_headers(source, st)
+        mc, sc = improved_citation_mask(manuscript, mt, mh), improved_citation_mask(source["text"], st, sh)
+        sq, _ = _long_quotes(source["text"], st, sh)
+        hard_target = {i for interval in report["classification"]["coverage_intervals"]
+                       if interval["state"] in {"excluded-front-matter", "excluded-bibliography"}
+                       for i in range(interval["word_start"], interval["word_end"])}
+        excluded_source = [b or (report["settings"]["exclude_quotes"] and q)
+                           for b, q in zip(excluded_source, sq)]
+        m_map = [i for i in m_map if not mh[i]]
+        s_map = [i for i in s_map if not sh[i]]
+        mt, st = [mt[i] for i in m_map], [st[i] for i in s_map]
+        mc, sc = [mc[i] for i in m_map], [sc[i] for i in s_map]
+        excluded_source = [excluded_source[i] for i in s_map]
+        hard_target = {i for i, original in enumerate(m_map) if original in hard_target}
+        hard_source = [hard_source[i] for i in s_map]
+        eligible = {i for i, original in enumerate(m_map) if original in eligible}
+        ma, mb = bisect_left(m_map, ma), bisect_left(m_map, mb)
+        sa, sb = bisect_left(s_map, sa), bisect_left(s_map, sb)
     dp = [[0] * (sb - sa + 1) for _ in range(mb - ma + 1)]
     for a in range(mb - ma - 1, -1, -1):
         for b in range(sb - sa - 1, -1, -1):
@@ -134,17 +162,26 @@ def _reference_probe(report, reference, documents, eligible):
     if not path:
         return {"status": "no-equal-prose", "source": reference["source_id"],
                 "matched_non_citation_words": 0, "longest_exact_run": 0, "seed": None,
-                "manuscript_span": [ma, mb], "source_span": [sa, sb],
+                "manuscript_span": [reference["word_start"], reference["word_end"]],
+                "source_span": [reference["source_word_start"], reference["source_word_end"]],
                 "manuscript_density": 0, "source_density": 0,
                 "manuscript_gap_sequence": [], "source_gap_sequence": [],
                 "citation_matches": {"count": 0, "aligned_pairs": []},
                 "citation_tokens_inside_span": {"manuscript": sum(mc[ma:mb]), "source": sum(sc[sa:sb])},
                 "reason": "No equal eligible noncitation words in these actual labeled manuscript/source ranges."}
+    details = alignment_details(tuple(path), [w[0] for w in mt], [w[0] for w in st], mc, sc)
+    details.update(logical_manuscript_span=details["manuscript_span"], logical_source_span=details["source_span"],
+                   manuscript_span=[m_map[path[0][0]], m_map[path[-1][0]] + 1],
+                   source_span=[s_map[path[0][1]], s_map[path[-1][1]] + 1])
+    if details["seed"]:
+        details["seed"]["aligned_pairs"] = [[m_map[a], s_map[b]] for a, b in details["seed"]["aligned_pairs"]]
     return {"status": "computed", "source": reference["source_id"],
             "basis": "Diagnostic-only deterministic LCS in labeled bounds; not a substitute for detector alternative search.",
-            "crosses_exclusion_boundary": (any(i not in eligible for i in range(path[0][0], path[-1][0] + 1))
-                                          or any(excluded_source[path[0][1]:path[-1][1] + 1])),
-            **alignment_details(tuple(path), [w[0] for w in mt], [w[0] for w in st], mc, sc)}
+            "crosses_exclusion_boundary": (any(i in hard_target for i in range(path[0][0], path[-1][0] + 1))
+                                          or any(hard_source[path[0][1]:path[-1][1] + 1])),
+            "contains_excluded_gap_tokens": (any(i not in eligible for i in range(path[0][0], path[-1][0] + 1))
+                                            or any(excluded_source[path[0][1]:path[-1][1] + 1])),
+            **details}
 
 
 def evaluate_passages(report, gold, expected_source_count=61, source_documents=None):

@@ -238,6 +238,9 @@ def main():
     if report.get("classification"):
         summary["classification_counts"] = {key: report["classification"]["metrics"][key] for key in
             ("exact_words", "similar_only_words", "unmatched_words", "not_fully_checked_words")}
+    if model == "improvedEng":
+        summary["eligibility_profile"] = report["settings"].get("eligibility_profile")
+        summary["word_accounting"]["header_removed_words"] = report["metrics"].get("header_removed_words", 0)
     progress("write-evidence")
     if report.get("comparison_model") == "improvedEng":
         from buna.match_diagnostics import diagnostics_csv
