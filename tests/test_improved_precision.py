@@ -354,3 +354,20 @@ def test_citation_and_short_quote_recognition_after_logical_header_removal():
     headers, _ = running_headers(target, ledger)
     quoted, _ = _long_quotes(target["text"], ledger, headers)
     assert not any(quoted)
+
+
+def test_compaction_preserves_exhaustive_accepted_pair_coverage():
+    from test_improved_eng import oracle
+    from buna.improved_eng import _is_exact
+    prefix = "alpha beta gamma delta epsilon zeta".split()
+    variants = [prefix + list(suffix) for suffix in itertools.product(("eta", "theta"), repeat=3)]
+    for target, source in itertools.product(variants, repeat=2):
+        expected = [path for path in oracle(target, source)
+                    if _is_exact(path) or accepts_similar(path, target, [False] * 9, [False] * 9)]
+        result = compare(doc(" ".join(target)), doc(" ".join(source) + " ending"))
+        observed = set()
+        for match in result["matches"]:
+            for alignment in [match["aligned_pairs"], *match["alternative_alignments"]]:
+                observed.update(map(tuple, alignment))
+        assert observed == {pair for path in expected for pair in path}
+        assert result["metrics"]["overlapping_words"] == len({a for a, _ in observed})
