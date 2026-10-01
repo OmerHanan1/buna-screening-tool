@@ -225,6 +225,9 @@ test("cold-start readiness and connection retry stay explicit", async ({ page })
     await route.fulfill(ready ? { json: { mode: "email-gate" } } : { status: 503, json: { detail: "Starting." } });
   });
   await page.goto(site, { waitUntil: "domcontentloaded" });
+  await expect(page.getByText("Made for Orchuk", { exact: true })).toBeVisible();
+  await expect(page.getByText("Text similarity for research", { exact: true })).toHaveCount(0);
+  await expect(page.locator("footer")).toHaveText("For research review.Source code · AGPL");
   await page.getByLabel("Email address").fill("allowed@example.org");
   await expect(page.getByRole("button", { name: "Continue", exact: true })).toBeDisabled();
   await expect(page.getByRole("status")).toContainText("First access may take a moment");

@@ -465,7 +465,7 @@ export default function PublicApp() {
 
   return <div className="hosted-app">
     <header className="hosted-header"><div className="hosted-brand"><FileText size={19} aria-hidden="true" />Paper Overlap Detector</div>
-      {hasAccess ? <button className="hosted-text-button" onClick={leave}>Leave workspace</button> : <span className="hosted-header-note">Text similarity for research</span>}</header>
+      {hasAccess ? <button className="hosted-text-button" onClick={leave}>Leave workspace</button> : <span className="hosted-header-note">Made for Orchuk</span>}</header>
     <main className={`hosted-main ${!hasAccess ? "hosted-entry" : ""}`}>
       {!hasAccess ? <>
         <div className="hosted-title"><h1>Open your workspace</h1><p>Enter your email to continue.</p></div>
@@ -575,7 +575,7 @@ export default function PublicApp() {
         {removalAvailable && <details className="hosted-info"><summary>Removing library papers</summary><p>Deselecting affects only this comparison. Remove from library requires confirmation and affects every app user. Existing reports and admitted comparisons are unchanged. Bundled files remain packaged privately; removed uploaded files enter delayed private cleanup.</p></details>}
       </>}
     </main>
-    <footer className="hosted-footer"><span>For research review. Not affiliated with Crossref or Turnitin.</span><a href="https://github.com/OmerHanan1/buna-screening-tool" target="_blank" rel="noreferrer">Source code · AGPL</a></footer>
+    <footer className="hosted-footer"><span>For research review.</span><a href="https://github.com/OmerHanan1/buna-screening-tool" target="_blank" rel="noreferrer">Source code · AGPL</a></footer>
     {reviewing && <PaperDialog papers={papers} selected={selected} onSelect={setSelected} onClose={() => setReviewing(false)} readOnly={busy || job !== null}
       onRemove={removalAvailable ? removeLibraryPaper : undefined} />}
   </div>;
