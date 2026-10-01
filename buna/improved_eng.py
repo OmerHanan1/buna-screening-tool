@@ -160,12 +160,21 @@ def _paths(graph: dict[Pair, tuple[Pair, ...]], check: Callable[[], None]) -> It
 
 def search(mw: list[str], sw: list[str], m_ok: list[bool], s_ok: list[bool],
            check: Callable[[], None], *, working_bytes: int = WORKING_INDEX_BYTES,
-           m_cited: list[bool] | None = None, s_cited: list[bool] | None = None) -> Iterator[Path]:
+           m_cited: list[bool] | None = None, s_cited: list[bool] | None = None,
+           m_skipped: list[bool] | None = None, s_skipped: list[bool] | None = None) -> Iterator[Path]:
     """Original v1 search; citation tokens cannot seed or qualify graph nodes."""
     m_cited = m_cited if m_cited is not None else [False] * len(mw)
     s_cited = s_cited if s_cited is not None else [False] * len(sw)
     if not (len(mw) == len(m_ok) == len(m_cited) and len(sw) == len(s_ok) == len(s_cited)):
         raise ValueError("Eligibility/citation masks must use the original word ledger.")
+    if m_skipped is not None:
+        if len(m_skipped) != len(mw):
+            raise ValueError("Skipped quotation mask must use the logical word ledger.")
+        m_cited = [c or q for c, q in zip(m_cited, m_skipped)]
+    if s_skipped is not None:
+        if len(s_skipped) != len(sw):
+            raise ValueError("Skipped quotation mask must use the logical word ledger.")
+        s_cited = [c or q for c, q in zip(s_cited, s_skipped)]
     mr, sr = _regions(m_ok), _regions(s_ok)
     table: dict[tuple[str, ...], list[int]] = defaultdict(list)
     index_bytes = 0
@@ -257,6 +266,14 @@ def _collect(paths: list[Path], candidate: Path, budget: _Evidence, check: Calla
     paths.append(candidate)
 
 
+def _long_quotes(text, ledger):
+    recognized, uncertain = _quotation_intervals(text)
+    # Count actual tokenizer units, not whitespace or punctuation. Nested quoted
+    # names inside a long outer quote remain part of that outer quotation.
+    long_intervals = [(a, b) for a, b in recognized if len(tokens(text[a:b])) > 3]
+    return _mask(ledger, long_intervals), _mask(ledger, sorted(uncertain))
+
+
 def improved_report(manuscript: dict, sources: list[dict], *, config: dict | None = None,
                     exclude_quotes: bool = True, manuscript_scope: str = "abstract-onward",
                     load_document: Callable[[dict], dict] | None = None,
@@ -289,8 +306,7 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
     original_cited = citation_mask(text, mt)
     m_cited = [original_cited[i] for i in m_map]
     bib = _mask(mt, _intervals(manuscript))
-    quote_intervals, uncertain_intervals = _quotation_intervals(text)
-    quoted, uncertain = _mask(mt, quote_intervals), _mask(mt, sorted(uncertain_intervals))
+    quoted, uncertain = _long_quotes(text, mt)
     front = [False] * len(mt)
     scope = {"requested": manuscript_scope, "applied": "whole-document", "start_offset": None,
              "start_page": None, "heading_text": None}
@@ -304,6 +320,8 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
             warnings.append("Abstract heading not detected; the whole manuscript was analyzed (front matter was not excluded).")
     eligible = [not (b or f or h or (exclude_quotes and q)) for b, f, h, q in zip(bib, front, headers, quoted)]
     m_ok = [eligible[i] for i in m_map]
+    m_hard = [not (bib[i] or front[i]) for i in m_map]
+    m_skipped = [exclude_quotes and quoted[i] for i in m_map]
     accounting = manuscript_word_accounting(eligible, front, bib, quoted, exclude_quotes=exclude_quotes)
     denominator = accounting["score_denominator_words"]
     numbers = {str(s.get("id", f"source-{i + 1}")): s.get("source_number", i + 1) for i, s in enumerate(sources)}
@@ -383,6 +401,9 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
             row["source_content_sha256"] = hashlib.sha256(document["text"].encode()).hexdigest()
             s_bib = _mask(st, _intervals(document))
             s_ok = [not s_bib[i] for i in s_map]
+            s_quoted, _ = _long_quotes(document["text"], st)
+            s_skipped = [exclude_quotes and s_quoted[i] for i in s_map]
+            s_exact = [ok and not q for ok, q in zip(s_ok, s_skipped)]
             if sw == mw:
                 row.update(status="excluded-identical", reason="Identical normalized manuscript/source text.")
                 done()
@@ -392,30 +413,31 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
             # Publish cheap real exact evidence even if the harder graph later stops.
             from buna.classified import _Limit as ExactLimit
             try:
-                for a, e, b, f in _exact_runs(mw, m_ok, _regions(m_ok), sw, s_ok, _regions(s_ok), 9, budget):
+                for a, e, b, f in _exact_runs(mw, m_ok, _regions(m_ok), sw, s_exact, _regions(s_exact), 9, budget):
                     _collect(scored_paths, tuple(zip(range(a, e), range(b, f))), evidence_budget, budget)
             except ExactLimit as exc:
                 raise SearchLimit(exc.kind, exc.reason) from exc
-            for path in search(mw, sw, m_ok, s_ok, budget, m_cited=m_cited, s_cited=s_cited,
+            for path in search(mw, sw, m_hard, s_ok, budget, m_cited=m_cited, s_cited=s_cited,
+                               m_skipped=m_skipped, s_skipped=s_skipped,
                                working_bytes=WORKING_INDEX_BYTES):
                 _collect(scored_paths, path, evidence_budget, budget)
             row["scored_search_complete"] = True
             phase = "audit"
             # Audit work must not consume the rest of the budget for later sources.
             audit_deadline = min(started + fair_seconds, time.monotonic() + fair_seconds * 0.1)
-            if not all(m_ok) or not all(s_ok):
+            if not all(m_ok) or not all(s_exact):
                 if audit_memory_exhausted:
                     raise SearchLimit("audit-memory-limit", "Optional excluded-text audit memory was exhausted; scored search is complete and unchanged.")
                 for path in search(mw, sw, [True] * len(mw), [True] * len(sw), budget,
                                    m_cited=m_cited, s_cited=s_cited, working_bytes=WORKING_INDEX_BYTES):
                     ma, mb, sa, sb = path[0][0], path[-1][0] + 1, path[0][1], path[-1][1] + 1
-                    if not all(m_ok[ma:mb]) or not all(s_ok[sa:sb]):
+                    if any(not m_ok[a] or not s_exact[b] for a, b in path):
                         _collect(audit_paths, path, audit_budget, budget)
                 try:
                     for a, e, b, f in _exact_runs(mw, [True] * len(mw), [0] * len(mw), sw, [True] * len(sw),
                                                 [0] * len(sw), 9, budget):
                         path = tuple(zip(range(a, e), range(b, f)))
-                        if not all(m_ok[a:e]) or not all(s_ok[b:f]):
+                        if not all(m_ok[a:e]) or not all(s_exact[b:f]):
                             _collect(audit_paths, path, audit_budget, budget)
                 except ExactLimit as exc:
                     raise SearchLimit(exc.kind, exc.reason) from exc
@@ -470,10 +492,12 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
                     reasons.append("front-matter")
                 if any(bib[ma:mb]):
                     reasons.append("bibliography")
-                if exclude_quotes and any(quoted[ma:mb]):
+                if exclude_quotes and any(quoted[i] for i in m_positions):
                     reasons.append("recognized-quotation")
                 if any(s_bib[sa:sb]):
                     reasons.append("source-bibliography")
+                if exclude_quotes and any(s_quoted[i] for i in s_positions):
+                    reasons.append("source-quotation")
                 match = {
                     "source_id": sid, "source_number": numbers[sid], "source_content_sha256": row["source_content_sha256"],
                     "kind": "exact" if kind == "exact" else "near-verbatim", "match_kind": kind,
@@ -498,7 +522,12 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
                                logical_manuscript_span=[path[0][0], path[-1][0] + 1],
                                logical_source_span=[path[0][1], path[-1][1] + 1],
                                header_removed_words=sum(headers[ma:mb]),
-                               source_header_removed_words=sum(s_headers[sa:sb]))
+                               source_header_removed_words=sum(s_headers[sa:sb]),
+                               matched_quoted_words=sum(quoted[i] for i in m_positions),
+                               source_matched_quoted_words=sum(s_quoted[i] for i in s_positions),
+                               quotation_tokens_inside_span=sum(quoted[ma:mb]),
+                               source_quotation_tokens_inside_span=sum(s_quoted[sa:sb]),
+                               local_eligible_words=sum(eligible[ma:mb]))
                 if details["seed"]:
                     details["seed"]["aligned_pairs"] = [[m_map[a], s_map[b]] for a, b in details["seed"]["aligned_pairs"]]
                 details["citation_matches"]["aligned_pairs"] = [
@@ -586,6 +615,7 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
                 },
                 "normalization_version": NORMALIZATION_VERSION, "source_time_limit_seconds": source_seconds,
                 "layout_version": LAYOUT_VERSION,
+                "quotation_policy": "improvedEng: balanced quotes of at most three words ignored; longer quotes excluded individually on both sides when enabled, retaining gap/span positions",
                 "evidence_memory_policy": "live-retained-scored-priority-v1",
                 "total_time_limit_seconds": total_time_limit_seconds, "working_index_limit_mib": 128}
     return {

@@ -93,3 +93,49 @@ def test_exact_seven_prose_two_citation_exception():
     result = compare(doc(phrase), doc(phrase + " ending"))
     assert result["metrics"]["exact_words"] == 9
     assert result["matches"][0]["diagnostics"]["citation_matches"]["count"] == 2
+
+
+@pytest.mark.parametrize("name", ["'toolkit'", '"toolkit"', "\u2018toolkit\u2019", "\u201c'toolkit'\u201d",
+                                 '"the toolkit package"'])
+def test_short_technical_quotes_do_not_exclude_match(name):
+    phrase = f"estimated marginal means were computed using the {name} package today"
+    result = compare(doc(phrase), doc(phrase + " ending"))
+    assert result["metrics"]["overlapping_words"] == len(tokens(phrase))
+    assert not result["metrics"]["excluded_quotation_words"]
+    assert result["matches"][0]["quotation"]["matched_quoted_words"] == 0
+
+
+@pytest.mark.parametrize("side", ["target", "source", "both"])
+@pytest.mark.parametrize("count,accepted", [(4, True), (5, True), (6, False)])
+def test_long_quotes_are_individual_gap_tokens(side, count, accepted):
+    first, last = "alpha beta gamma delta epsilon", "zeta eta theta iota kappa"
+    quote = '"' + " ".join(["quoted"] * count) + '"'
+    target = first + " " + (quote if side != "source" else "") + " " + last
+    source = first + " " + (quote if side != "target" else "") + " " + last + " ending"
+    result = compare(doc(target), doc(source))
+    assert result["metrics"]["overlapping_words"] == (10 if accepted else 0)
+    assert result["metrics"]["eligible_words"] == 10
+    if accepted:
+        match = result["matches"][0]
+        assert match["match_kind"] == "similar"
+        assert match["max_unmatched_run"] == count
+        assert match["similarity"] == 10 / (10 + count)
+        assert match["quotation"]["matched_quoted_words"] == 0
+        assert not match["exclusion_reasons"]
+
+
+def test_eight_eligible_words_cannot_be_rescued_by_long_quote():
+    phrase = 'alpha beta gamma delta "long quoted material here" epsilon zeta eta theta'
+    result = compare(doc(phrase), doc(phrase + " ending"))
+    assert result["metrics"]["eligible_words"] == 8
+    assert result["metrics"]["overlapping_words"] == 0
+    assert compare(doc(phrase), doc(phrase + " ending"), exclude_quotes=False)["metrics"]["exact_words"] == 12
+
+
+def test_quote_outside_aligned_match_has_no_exclusion_effect():
+    phrase = "alpha beta gamma delta epsilon zeta eta theta iota"
+    target = doc(phrase + ' "this long quotation is outside"')
+    result = compare(target, doc(phrase + " different ending"))
+    assert result["metrics"]["exact_words"] == 9
+    assert result["matches"][0]["quotation"]["status"] == "not-detected"
+    assert not result["matches"][0]["exclusion_reasons"]

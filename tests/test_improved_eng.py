@@ -186,14 +186,11 @@ def test_occurrences_remain_distinct_and_compatible_runs_consolidate():
     assert found(phrase + " j k l", phrase + " j k l") == [tuple((i, i) for i in range(12))]
 
 
-def test_hard_exclusion_boundaries_and_raw_audit():
+def test_short_quotes_are_normal_eligible_words():
     result = report('a b c d "quoted bridge here" e f g h i', "a b c d quoted bridge here e f g h i")
-    assert result["metrics"]["overlapping_words"] == 0
-    assert result["metrics"]["eligible_words"] == 9
-    assert result["improved_eng"]["raw_excluded_evidence"]
-    assert all(m["excluded_from_score"] and not m["scored_word_positions"]
-               for m in result["improved_eng"]["raw_excluded_evidence"])
-    assert not result["matches"]
+    assert result["metrics"]["overlapping_words"] == 12
+    assert result["metrics"]["eligible_words"] == 12
+    assert not result["improved_eng"]["raw_excluded_evidence"]
     assert report('a b c d "quoted bridge here" e f g h i', "a b c d quoted bridge here e f g h i",
                   exclude_quotes=False)["metrics"]["overlapping_words"] == 12
 
@@ -273,12 +270,12 @@ def test_audit_limit_is_not_scored_search_failure(monkeypatch):
     original = engine.search
 
     def audit_limit(mw, sw, m_ok, s_ok, *args, **kwargs):
-        if all(m_ok):
+        if "m_skipped" not in kwargs:
             raise engine.SearchLimit("source-time-limit", "Audit budget ended.")
         yield from original(mw, sw, m_ok, s_ok, *args, **kwargs)
 
     monkeypatch.setattr(engine, "search", audit_limit)
-    result = report('a b c d e f g h i "excluded quote"', "a b c d e f g h i")
+    result = report('a b c d e f g h i "excluded long quote here"', "a b c d e f g h i")
     assert result["metrics"]["overlapping_words"] == 9
     assert result["source_coverage"][0]["scored_search_complete"]
     assert not result["source_coverage"][0]["audit_search_complete"]
