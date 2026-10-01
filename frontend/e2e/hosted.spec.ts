@@ -9,6 +9,48 @@ const backend = "https://paper-overlap-api.purpleflower-beedf5ce.eastus.azurecon
 const sitePath = new URL(site).pathname;
 const staticConfig = JSON.parse(await fs.readFile("public/staticwebapp.config.json", "utf8"));
 
+test("already-present saves locate the exact shared paper without adding a duplicate", async ({ page }) => {
+  const digest = "a".repeat(64);
+  const paper = { sha256: digest, title: "Existing canonical paper.pdf", version: "Shared upload", attribution: "", license: "", license_url: "", storage_kind: "shared", library_version: "0" };
+  let libraryReads = 0, comparisons = 0, saveRequests = 0;
+  await page.route(site + "**", async route => route.fulfill(await staticResponse(route.request().url())));
+  await page.route(backend + "/**", async route => {
+    const pathname = new URL(route.request().url()).pathname;
+    if (pathname.endsWith("/config")) return route.fulfill({ json: { mode: "email-gate" } });
+    if (pathname.endsWith("/session")) return route.fulfill({ json: { token: "synthetic-duplicate-visibility" } });
+    if (pathname.endsWith("/library")) {
+      libraryReads++;
+      return route.fulfill({ json: { papers: [paper], shared_saving_available: true, immediate_shared_saving: true } });
+    }
+    if (pathname.endsWith("/source-uploads")) return route.fulfill({ status: 201, json: { id: "private-stage", state: "ready", digest } });
+    if (pathname.endsWith("/source-saves")) {
+      saveRequests++;
+      return route.fulfill({ status: 202, json: { id: "save-receipt", state: "already-present", digest, reason: "" } });
+    }
+    if (pathname.endsWith("/jobs")) comparisons++;
+    return route.fulfill({ status: 404 });
+  });
+  await page.goto(site);
+  await page.getByLabel("Email address").fill("synthetic@example.org");
+  await page.getByRole("button", { name: "Continue", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "1 papers selected", exact: true })).toBeVisible();
+  await page.getByLabel("Additional comparison papers").setInputFiles({
+    name: "Another filename.pdf", mimeType: "application/pdf", buffer: Buffer.from("%PDF-1.7\nOriginal synthetic fixture"),
+  });
+  await page.getByRole("checkbox", { name: /Keep in library for future comparisons/ }).check();
+  await expect(page.getByText("Already in shared library. No duplicate was added.", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Show in library", exact: true }).click();
+  const row = page.locator(`[data-paper-id="${digest}"]`);
+  await expect(row).toBeFocused();
+  await expect(row).toContainText("Existing canonical paper.pdf");
+  await expect(page.locator(".hosted-source-item")).toHaveCount(1);
+  expect(libraryReads).toBeGreaterThanOrEqual(3);
+  expect(saveRequests).toBe(1);
+  expect(comparisons).toBe(0);
+  await page.getByRole("button", { name: "Done", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "1 papers selected", exact: true })).toBeVisible();
+});
+
 test("saved eligible denominator accounting agrees with the displayed percentage", async ({ page }) => {
   await page.route(site + "**", async route => route.fulfill(await staticResponse(route.request().url())));
   await page.route(backend + "/**", async route => {

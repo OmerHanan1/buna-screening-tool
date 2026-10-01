@@ -47,6 +47,7 @@ export default function PublicApp() {
   const [fileError, setFileError] = useState("");
   const [sourceError, setSourceError] = useState("");
   const [reviewing, setReviewing] = useState(false);
+  const [focusedPaperId, setFocusedPaperId] = useState<string>();
   const [pdfBusy, setPdfBusy] = useState(false);
   const [startedAt, setStartedAt] = useState(0);
   const [submitted, setSubmitted] = useState({ title: "", count: 0 });
@@ -415,6 +416,16 @@ export default function PublicApp() {
     const refreshed = await loadLibrary(true);
     if (!refreshed) throw new Error("Removal was committed, but the library refresh failed. Retry to confirm its current contents.");
   }
+  async function reviewLibrary(digest?: string) {
+    const refreshed = await loadLibrary(true);
+    if (!refreshed) return;
+    if (digest && !refreshed.some(paper => paper.sha256 === digest)) {
+      setError("This paper is no longer in the shared library. It may have been removed. Nothing was uploaded again.");
+      return;
+    }
+    setFocusedPaperId(digest);
+    setReviewing(true);
+  }
   async function remove() {
     if (!job) return;
     try {
@@ -487,7 +498,7 @@ export default function PublicApp() {
         {!job && <>
           <fieldset disabled={busy} className="hosted-surface hosted-form">
             <section className="hosted-section"><span className="hosted-label">Your manuscript</span><ManuscriptInput file={target} error={fileError} onFile={chooseTarget} onRemove={() => { targetChoice.current++; setTarget(null); setFileError(""); }} /></section>
-            <section className="hosted-sources-row"><div><h2>{selected.length} papers selected</h2><p>From the {papers.length}-paper comparison library</p></div><button onClick={() => setReviewing(true)} disabled={!papers.length}>Review papers</button></section>
+            <section className="hosted-sources-row"><div><h2>{selected.length} papers selected</h2><p>From the {papers.length}-paper comparison library</p></div><button onClick={() => void reviewLibrary()} disabled={!papers.length || loadingLibrary}>Review papers</button></section>
             <section className="hosted-extras" aria-label="Comparison upload queue" onDragOver={e => e.preventDefault()} onDrop={e => { e.preventDefault(); void addSources(Array.from(e.dataTransfer.files)); }}>
               <input ref={extraInput} tabIndex={-1} className="hosted-hidden-input" type="file" multiple accept=".pdf,.txt" aria-label="Additional comparison papers" onChange={e => { void addSources(Array.from(e.target.files || [])); e.target.value = ""; }} />
               <button className="hosted-text-button" onClick={() => extraInput.current?.click()}><Plus size={15} />Add your own comparison papers</button>
@@ -509,7 +520,7 @@ export default function PublicApp() {
                 </div>
                 {sharedAvailable && /\.pdf$/i.test(file.name) && <label className="hosted-shared-option"><input type="checkbox" checked={keepSources.has(file)} disabled={!!sourceSaves.get(file) && savePending(sourceSaves.get(file)!)} onChange={e => { const checked = e.target.checked; setKeepSources(previous => { const next = new Set(previous); if (checked) next.add(file); else next.delete(file); return next; }); if (checked) void beginSourceSave(file); }} />Keep in library for future comparisons<span className="hosted-sr-only">: {file.name}</span></label>}
                 {sourceSaves.has(file) && <div className="hosted-shared-notice" role="status" aria-label={`Save status: ${file.name}`}>
-                  {saveReady(sourceSaves.get(file)) ? <><strong>{sourceSaves.get(file)?.state === "already-present" ? "Already in shared library." : "Saved to shared library."}</strong> Listed as “{papers.find(paper => paper.sha256 === sourceSaves.get(file)?.digest)?.title}” in Review papers. Removing or unchecking here does not delete the saved paper.</>
+                  {saveReady(sourceSaves.get(file)) ? <><strong>{sourceSaves.get(file)?.state === "already-present" ? "Already in shared library. No duplicate was added." : "Saved to shared library."}</strong> Listed as “{papers.find(paper => paper.sha256 === sourceSaves.get(file)?.digest)?.title}”. <button onClick={() => void reviewLibrary(sourceSaves.get(file)?.digest)}>Show in library</button> Removing or unchecking here does not delete the saved paper.</>
                     : sourceSaves.get(file)?.state === "failed" ? <><strong>Not confirmed saved.</strong> {sourceSaves.get(file)?.reason} <button onClick={() => void beginSourceSave(file)}>Retry save</button></>
                     : sourceSaves.get(file)?.state === "cancelled" ? "Save cancelled. The file was not added by this request."
                     : sourceSaves.get(file)?.state === "removed" ? "No longer in the shared library. Your private upload remains available for this comparison; check Keep again only to share it anew."
@@ -567,7 +578,8 @@ export default function PublicApp() {
         </section> : null}
         {job && sourceSaves.size > 0 && <section className="hosted-info" aria-label="Independent shared saves">
           <strong>Shared library</strong>
-          {[...sourceSaves].map(([file, save]) => <p key={save.key}>{file.name}: {saveReady(save) ? "Saved in shared library." : savePending(save) ? "Saving independently of this comparison…" : save.reason || "Not saved."}
+          {[...sourceSaves].map(([file, save]) => <p key={save.key}>{file.name}: {saveReady(save) ? save.state === "already-present" ? "Already in shared library; no duplicate was added." : "Saved in shared library." : savePending(save) ? "Saving independently of this comparison…" : save.reason || "Not saved."}
+            {saveReady(save) && <button onClick={() => void reviewLibrary(save.digest)}>Show in library</button>}
             {save.state === "failed" && <button onClick={() => void beginSourceSave(file)}>Retry save</button>}
             {save.id && <small> Save reference: {save.id}</small>}</p>)}
         </section>}
@@ -578,6 +590,6 @@ export default function PublicApp() {
     </main>
     <footer className="hosted-footer"><span>For research review.</span><a href="https://github.com/OmerHanan1/buna-screening-tool" target="_blank" rel="noreferrer">Source code · AGPL</a></footer>
     {reviewing && <PaperDialog papers={papers} selected={selected} onSelect={setSelected} onClose={() => setReviewing(false)} readOnly={busy || job !== null}
-      onRemove={removalAvailable ? removeLibraryPaper : undefined} />}
+      focusPaperId={focusedPaperId} onRemove={removalAvailable ? removeLibraryPaper : undefined} />}
   </div>;
 }

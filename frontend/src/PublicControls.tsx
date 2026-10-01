@@ -41,11 +41,13 @@ export function ManuscriptInput({ file, error, onFile, onRemove }: {
   </div>;
 }
 
-export function PaperDialog({ papers, selected, onSelect, onClose, readOnly = false, onRemove }: {
+export function PaperDialog({ papers, selected, onSelect, onClose, readOnly = false, onRemove, focusPaperId }: {
   papers: HostedPaper[]; selected: string[]; onSelect: (ids: string[]) => void; onClose: () => void; readOnly?: boolean;
   onRemove?: (paper: HostedPaper) => Promise<void>;
+  focusPaperId?: string;
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
+  const focusedPaper = useRef<HTMLDivElement>(null);
   const [query, setQuery] = useState("");
   const [credits, setCredits] = useState(false);
   const [removing, setRemoving] = useState<HostedPaper | null>(null);
@@ -53,6 +55,10 @@ export function PaperDialog({ papers, selected, onSelect, onClose, readOnly = fa
   useEffect(() => {
     const previous = document.activeElement as HTMLElement | null;
     dialog.current?.showModal();
+    if (focusPaperId) {
+      focusedPaper.current?.scrollIntoView({ block: "center" });
+      focusedPaper.current?.focus();
+    }
     return () => { dialog.current?.close(); previous?.focus(); };
   }, []);
   return <dialog ref={dialog} className="hosted-dialog" aria-labelledby="source-dialog-title" onCancel={onClose}
@@ -64,7 +70,11 @@ export function PaperDialog({ papers, selected, onSelect, onClose, readOnly = fa
       <div className="hosted-bulk"><button disabled={readOnly} className="hosted-text-button" onClick={() => onSelect(papers.map(p => p.sha256))}>Select all</button><button disabled={readOnly} className="hosted-text-button" onClick={() => onSelect([])}>Clear all</button><label><input type="checkbox" checked={credits} onChange={e => setCredits(e.target.checked)} /> Show credits</label></div>
     </div>
     <div className="hosted-source-list">
-      {filtered.map(paper => <div className="hosted-source-item" key={paper.sha256}>
+      {filtered.map(paper => <div className="hosted-source-item" key={paper.sha256}
+        ref={paper.sha256 === focusPaperId ? focusedPaper : undefined}
+        tabIndex={paper.sha256 === focusPaperId ? -1 : undefined}
+        data-paper-id={paper.sha256}
+        style={paper.sha256 === focusPaperId ? { outline: "2px solid var(--cp-accent)", outlineOffset: "-2px" } : undefined}>
         <label><input type="checkbox" disabled={readOnly} checked={selected.includes(paper.sha256)} onChange={e => onSelect(e.target.checked ? [...selected, paper.sha256] : selected.filter(id => id !== paper.sha256))} />
           <span className="hosted-source-copy"><strong title={paper.title}>{paper.title}</strong><small title={paper.version}>{paper.version}</small></span>
         </label>
