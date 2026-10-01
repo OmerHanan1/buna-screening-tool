@@ -22,7 +22,7 @@ import pymupdf as fitz
 from buna.result_state import result_state
 from buna.reports import _THEME
 
-PDF_RENDERER_VERSION = "8"
+PDF_RENDERER_VERSION = "9"
 _LOCK = threading.Lock()
 def _theme(name: str) -> str:
     match = re.search(rf"--cp-{re.escape(name)}:\s*(#[0-9a-fA-F]{{6}})", _THEME)
@@ -392,6 +392,7 @@ def _verify_summary_sources(summary: fitz.Document, numbers: dict[str, int]) -> 
 
 def generate_pdf(payload: dict, destination: Path) -> dict:
     report, job = payload["report"], payload["job"]
+    improved_presentation = report.get("comparison_model") == "improvedEng"
     pages = report.get("manuscript_pages") or job["document"]["pages"]
     text = "\n\n".join(page["text"] for page in pages)
     classified = (report.get("comparison_model") in {"classified-v1.1", "improvedEng"}
@@ -495,21 +496,33 @@ def generate_pdf(payload: dict, destination: Path) -> dict:
             annotations += 1
             continuations[(page_index, sequence_index + 1)] = comments[1:]
     omitted_labels = 0
+    marker_font = fitz.Font("helv") if improved_presentation else None
     for (page_index, y), source_ids in line_labels.items():
         page = manuscript[page_index]
         labels = ",".join(str(numbers.get(sid, sid)) for sid in sorted(source_ids, key=lambda sid: numbers.get(sid, 0)))
         if classified:
             labels = " ".join("/".join("E" if kind == "exact" else "S" for kind in sorted(line_kinds[(page_index, y)][sid]))
                               + str(numbers.get(sid, sid)) for sid in sorted(source_ids, key=lambda sid: numbers.get(sid, 0)))
-        rect = fitz.Rect(3, max(0, y), 34, min(page.rect.height, y + 11))
-        if len(labels) > 14 or any(rect.intersects(bound) for bound in page_glyph_bounds[page_index]):
+        bounds = page.rect * page.derotation_matrix if improved_presentation else page.rect
+        rect = fitz.Rect(3, max(0, y), 34, min(bounds.height, y + 11))
+        if (len(labels) > 14 or any(rect.intersects(bound) for bound in page_glyph_bounds[page_index])
+                or (marker_font is not None and marker_font.text_length(labels, fontsize=6.5) > rect.width - 4)):
             omitted_labels += 1
             continue
-        page.insert_textbox(rect, labels, fontsize=6.5, fontname="helv", color=_color("accent"), align=fitz.TEXT_ALIGN_RIGHT)
+        if improved_presentation and mode == "original-pdf":
+            marker = page.add_freetext_annot(rect, labels, fontsize=6.5, fontname="helv",
+                                            text_color=_color("accent"), align=fitz.TEXT_ALIGN_RIGHT)
+            marker.set_info(title="Source references", subject="Source key labels")
+            marker.set_flags(fitz.PDF_ANNOT_IS_PRINT | fitz.PDF_ANNOT_IS_READ_ONLY)
+            marker.update()
+        else:
+            page.insert_textbox(rect, labels, fontsize=6.5, fontname="helv", color=_color("accent"), align=fitz.TEXT_ALIGN_RIGHT)
     outcome = result_state(report)
     metrics = report.get("metrics", {})
     denominator = metrics.get("score_denominator_words", metrics.get("eligible_words", 0))
     body = f"<h1>Paper Overlap Detector</h1><p><b>{html.escape(str(job.get('filename') or job.get('title', 'Your paper')))}</b></p>"
+    if improved_presentation and mode == "original-pdf":
+        body += "<p class='muted'>Original manuscript PDF pages, layout, figures and tables are preserved below this source key. Highlights and source labels are annotation overlays.</p>"
     if classified:
         counts = (report.get("classification") or {}).get("metrics") or {}
         body += "<p class='warn'>Experimental exact + similar wording model. Scores may differ; accuracy and vendor equivalence are not established.</p>"
@@ -517,6 +530,8 @@ def generate_pdf(payload: dict, destination: Path) -> dict:
                  f"<b>S · Similar wording</b> only: {int(counts.get('similar_only_words', 0))} words · "
                  f"Combined: {int(counts.get('combined_words', 0))} unique words.</p>")
         similar_description = (
+            html.escape(str((report.get("methodology") or {}).get("similar", "the saved improvedEng rules")))
+            if report.get("algorithm_version") == "improvedEng-v3.2-precision" else
             "at least nine eligible non-citation equal words, four distinct meaningful words including literal numbers/statistics, and a three-word exact run containing one meaningful word; gaps at most five and global density at least 60% per side. Repeated headers are removed logically; long quotations consume gaps and quotations of at most three words remain eligible"
             if report.get("algorithm_version") == "improvedEng-v3.1-precision" else
             "at least nine eligible non-citation equal words, four distinct content words and a four-word exact run containing two content words; gaps at most five and global density at least 60% per side. Repeated headers are removed logically; long quotations consume gaps and quotations of at most three words remain eligible"
@@ -527,7 +542,12 @@ def generate_pdf(payload: dict, destination: Path) -> dict:
             if report.get("algorithm_version") == "improvedEng-v2" else
             "ordered shared wording, at least nine equal words, gap at most five and density at least 60% per side"
             if report.get("comparison_model") == "improvedEng" else "shared wording with bounded edits or reordering")
-        body += f"<p class='muted'>Exact: contiguous equal normalized words. Similar: {similar_description}. Exact takes visual precedence; comments retain source alternatives. E/S marks remain usable in grayscale.</p>"
+        if improved_presentation:
+            body += "<p class='muted'>E: exact wording. S: similar wording under the saved comparison rules. Exact takes visual precedence. Notes retain source alternatives and original source passages; detailed rules remain in the evidence JSON.</p>"
+            if report.get("algorithm_version") == "improvedEng-v3.2-precision":
+                body += "<p class='muted'>This saved model counts literal operator units and verified complete identical APA units; weak one- or two-unit aligned edge padding is trimmed. The three-word prose seed, four meaningful types, gap-five and 60% density rules remain.</p>"
+        else:
+            body += f"<p class='muted'>Exact: contiguous equal normalized words. Similar: {similar_description}. Exact takes visual precedence; comments retain source alternatives. E/S marks remain usable in grayscale.</p>"
     body += _summary_table(report, numbers, names)
     basis = {"all-submitted-word-units": "total submitted word units",
              "abstract-onward-word-units": "words from the Abstract onward",
@@ -551,8 +571,8 @@ def generate_pdf(payload: dict, destination: Path) -> dict:
         body += "<p class='warn'>Partial comparison: overlap is a lower bound; not all source passages were checked.</p>"
     if report.get("comparison_model") == "experimental-ordered":
         body += "<p class='warn'>Experimental comparison model: accuracy and vendor equivalence are not established.</p>"
-    if report.get("comparison_model") == "improvedEng":
-        body += "<p class='warn'>improvedEng: experimental ordered lexical matching; no semantic matching or verified Crossref equivalence. Excluded-text audit evidence is separate in JSON.</p>"
+    if improved_presentation:
+        body += f"<p class='muted'>Model: {html.escape(str(report.get('algorithm_version', 'improvedEng')))}. Excluded-text diagnostics and matching rules are retained in JSON.</p>"
     if report.get("comparison_model") in {"classified-v1.1", "improvedEng"} and not classified:
         body += "<p class='warn'>Exact/similar classification data is unavailable in this saved report. Existing evidence is shown without inferred match-type labels.</p>"
     if classified:
@@ -629,6 +649,8 @@ def generate_pdf(payload: dict, destination: Path) -> dict:
                 "sequence_groups": len(sequences), "linked_source_comments": linked_comments,
                 "failures": failures, "warning": warning,
                 "comparison_recomputed": False}
+    if improved_presentation:
+        manifest["presentation"] = "original-manuscript-annotation-overlay" if mode == "original-pdf" else "explicit-saved-text-fallback"
     output.close(); summary.close(); manuscript.close()
     return manifest
 

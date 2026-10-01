@@ -173,6 +173,16 @@ publication explicitly; saved evidence JSON and comparison scores are unchanged.
 long titles, zero/partial/unavailable statuses and manuscript annotation offsets
 inside the production image. Existing downloaded PDFs do not update themselves.
 
+PDF renderer 9 changes only improvedEng presentation: original manuscript PDF
+content streams, page geometry, fonts, figures and tables remain the baseline.
+Source-margin references are annotation overlays rather than new page-content
+text. The existing summary/source key stays first, with a compact E/S legend;
+there is no automatic navigation change. Standard and classified report-body
+rendering stays unchanged. Missing or changed original files still produce an
+explicitly labeled saved-text fallback, never a claim of original-PDF fidelity.
+Report metrics, matched-word positions and saved comparison inputs are not
+recalculated or modified by PDF generation.
+
 ### Origin cutover and rollback
 
 Only one operator may deploy/update the backend at a time. Wait for running jobs
