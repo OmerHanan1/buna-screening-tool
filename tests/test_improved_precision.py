@@ -240,9 +240,12 @@ def test_citation_years_never_gain_numeric_meaningful_credit(citation_side):
     source = cited.replace("alpha", "gamma").replace("beta", "delta") if citation_side != "target" else ordinary
     result = compare(doc(target), doc(source + " ending"))
     match = next(m for m in result["matches"] if m["match_kind"] == "similar")
-    assert all(a >= 4 and b >= 4 for a, b in match["aligned_pairs"])
+    if citation_side != "both":
+        assert all(a >= 4 and b >= 4 for a, b in match["aligned_pairs"])
+    else:
+        assert match["diagnostics"]["verified_citation_words"] == 4
     assert match["diagnostics"]["distinct_matched_content_words"] == 5
-    assert match["matched_words"] == 9
+    assert match["matched_words"] == (13 if citation_side == "both" else 9)
 
 
 def test_thirty_eight_duplicates_charge_one_retained_path():

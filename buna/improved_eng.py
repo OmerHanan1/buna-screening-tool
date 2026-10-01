@@ -9,7 +9,7 @@ from collections import defaultdict
 from bisect import bisect_left, bisect_right
 from dataclasses import asdict, dataclass
 from typing import Callable, Iterator
-from buna.citation_tokens import APA_VERSION, improved_citation_mask as citation_mask
+from buna.citation_tokens import APA_VERSION, apa_units, improved_citation_mask as citation_mask
 from buna.span_evaluation import ledger_sha256
 from buna.match_diagnostics import alignment_details, raw_citation_pairs
 from buna.improved_layout import LAYOUT_VERSION, running_headers
@@ -82,9 +82,12 @@ def content_details(path: Path, mw: list[str], m_cited: list[bool], s_cited: lis
             "content_policy_version": CONTENT_POLICY_VERSION}
 
 
-def accepts_similar(path: Path, mw: list[str], m_cited: list[bool], s_cited: list[bool]) -> bool:
+def accepts_similar(path: Path, mw: list[str], m_cited: list[bool], s_cited: list[bool],
+                    blocks=None) -> bool:
     info = content_details(path, mw, m_cited, s_cited)
-    return valid(path) and info["distinct_matched_content_words"] >= 4 and info["strongest_three_word_run_meaningful_words"] >= 1
+    cited_pairs = {p for p in path if m_cited[p[0]] or s_cited[p[1]]}
+    return (valid(path) and (not cited_pairs or (blocks is not None and cited_pairs <= blocks.verified_pairs(path)))
+            and info["distinct_matched_content_words"] >= 4 and info["strongest_three_word_run_meaningful_words"] >= 1)
 
 
 @dataclass(frozen=True)
@@ -122,10 +125,13 @@ def measures(path: Path) -> dict:
     }
 
 
-def _seed_ends(path: Path) -> list[int]:
+def _seed_ends(path: Path, m_cited=None, s_cited=None) -> list[int]:
     ends, run = [], 0
     previous = None
     for index, pair in enumerate(path):
+        if m_cited is not None and (m_cited[pair[0]] or s_cited[pair[1]]):
+            run, previous = 0, None
+            continue
         run = run + 1 if previous and pair == (previous[0] + 1, previous[1] + 1) else 1
         if run >= 3:
             ends.append(index)
@@ -144,15 +150,16 @@ def valid(path: Path) -> bool:
             and 5 * len(path) >= 3 * info["source_span"])
 
 
-def _windows(path: Path, check: Callable[[], None]) -> Iterator[Path]:
+def _windows(path: Path, check: Callable[[], None], *, m_cited=None, s_cited=None,
+             boundaries=lambda first, last: True) -> Iterator[Path]:
     """All inclusion-maximal valid windows of one gap-legal monotone path."""
     check()
     if len(path) < 9:
         return
-    ends = _seed_ends(path)
+    ends = _seed_ends(path, m_cited, s_cited)
     if not ends:
         return
-    if valid(path):
+    if valid(path) and boundaries(path[0], path[-1]):
         yield path
         return
     # A failed density prefix may recover; only containing valid windows dominate.
@@ -167,6 +174,7 @@ def _windows(path: Path, check: Callable[[], None]) -> Iterator[Path]:
             check()
             count = end - start + 1
             if (ends[seed_cursor] <= end
+                    and boundaries(path[start], path[end])
                     and 5 * count >= 3 * (path[end][0] - path[start][0] + 1)
                     and 5 * count >= 3 * (path[end][1] - path[start][1] + 1)):
                 covered_end = end
@@ -174,22 +182,86 @@ def _windows(path: Path, check: Callable[[], None]) -> Iterator[Path]:
                 break
 
 
+class _CitationBlocks:
+    """Pair-specific atomic APA chains; matching one fragment is never enough."""
+    def __init__(self, mw, sw, m_units, s_units, m_ok, s_ok, m_skipped, s_skipped):
+        self.bytes = (16 * (len(mw) + len(sw)) + 256 * (len(m_units) + len(s_units))
+                      + 64 * (sum(hi - lo for lo, hi in m_units) + sum(hi - lo for lo, hi in s_units)))
+        if self.bytes > WORKING_INDEX_BYTES:
+            raise SearchLimit("index-memory-limit", "Citation unit index reached the working-memory budget.")
+        self.manuscript = self._index(mw, m_units, m_ok, m_skipped)
+        self.source = self._index(sw, s_units, s_ok, s_skipped)
+
+    @staticmethod
+    def _index(words, units, ok, skipped):
+        result = [None] * len(words)
+        for lo, hi in units:
+            if all(ok[lo:hi]) and not (skipped and any(skipped[lo:hi])):
+                unit = (lo, hi, tuple(words[lo:hi]))
+                for index in range(lo, hi):
+                    result[index] = unit
+        return result
+
+    def pair_units(self, pair):
+        a, b = pair
+        m, s = self.manuscript[a], self.source[b]
+        return (m, s) if m and s and m[2] == s[2] and a - m[0] == b - s[0] else None
+
+    def entry(self, pair, direction):
+        units = self.pair_units(pair)
+        if not units:
+            return False
+        m, s = units
+        return pair == ((m[0], s[0]) if direction == 1 else (m[1] - 1, s[1] - 1))
+
+    def continuation(self, pair, direction):
+        units = self.pair_units(pair)
+        if units and not self.entry(pair, -direction):
+            return pair[0] + direction, pair[1] + direction
+        return None
+
+    def end(self, pair):
+        units = self.pair_units(pair)
+        return (units[0][1] - 1, units[1][1] - 1) if units else pair
+
+    def boundaries(self, first, last):
+        return ((self.pair_units(first) is None or self.entry(first, 1))
+                and (self.pair_units(last) is None or self.entry(last, -1)))
+
+    def verified_pairs(self, path):
+        pairs = set(path)
+        verified = set()
+        for pair in path:
+            if self.entry(pair, 1):
+                m, s = self.pair_units(pair)
+                unit_pairs = tuple(zip(range(m[0], m[1]), range(s[0], s[1])))
+                if all(p in pairs for p in unit_pairs):
+                    verified.update(unit_pairs)
+        return verified
+
+
 def _neighbors(pair: Pair, mw: list[str], sw: list[str], mr: list[int], sr: list[int],
                m_ok: list[bool], s_ok: list[bool], m_cited: list[bool], s_cited: list[bool],
-               direction: int) -> list[Pair]:
+               direction: int, blocks=None) -> list[Pair]:
     i, j = pair
+    forced = blocks.continuation(pair, direction) if blocks else None
+    if forced is not None:
+        return [forced]
     result = []
     for di in range(1, 7):
         a = i + di * direction
         if not 0 <= a < len(mw) or mr[a] != mr[i] or not m_ok[a]:
             break
-        if m_cited[a]:
+        if m_cited[a] and blocks is None:
             continue
         for dj in range(1, 7):
             b = j + dj * direction
             if not 0 <= b < len(sw) or sr[b] != sr[j] or not s_ok[b]:
                 break
-            if not s_cited[b] and mw[a] == sw[b]:
+            if mw[a] == sw[b] and (
+                (not m_cited[a] and not s_cited[b])
+                or (blocks is not None and blocks.entry((a, b), direction))
+            ):
                 result.append((a, b))
     return result
 
@@ -215,12 +287,17 @@ def _paths(graph: dict[Pair, tuple[Pair, ...]], check: Callable[[], None]) -> It
 def search(mw: list[str], sw: list[str], m_ok: list[bool], s_ok: list[bool],
            check: Callable[[], None], *, working_bytes: int = WORKING_INDEX_BYTES,
            m_cited: list[bool] | None = None, s_cited: list[bool] | None = None,
-           m_skipped: list[bool] | None = None, s_skipped: list[bool] | None = None) -> Iterator[Path]:
-    """Original v1 search; citation tokens cannot seed or qualify graph nodes."""
+           m_skipped: list[bool] | None = None, s_skipped: list[bool] | None = None,
+           citation_blocks=None) -> Iterator[Path]:
+    """Pure prose seeds; optionally traverse identical complete APA atomic units."""
     m_cited = m_cited if m_cited is not None else [False] * len(mw)
     s_cited = s_cited if s_cited is not None else [False] * len(sw)
     if not (len(mw) == len(m_ok) == len(m_cited) and len(sw) == len(s_ok) == len(s_cited)):
         raise ValueError("Eligibility/citation masks must use the original word ledger.")
+    blocks = citation_blocks
+    block_bytes = blocks.bytes if blocks else 0
+    if block_bytes > working_bytes:
+        raise SearchLimit("index-memory-limit", "Citation unit index reached the working-memory budget.")
     if m_skipped is not None:
         if len(m_skipped) != len(mw):
             raise ValueError("Skipped quotation mask must use the logical word ledger.")
@@ -231,7 +308,7 @@ def search(mw: list[str], sw: list[str], m_ok: list[bool], s_ok: list[bool],
         s_cited = [c or q for c, q in zip(s_cited, s_skipped)]
     mr, sr = _regions(m_ok), _regions(s_ok)
     table: dict[tuple[str, ...], list[int]] = defaultdict(list)
-    index_bytes = 0
+    index_bytes = block_bytes
     for j in range(len(sw) - 2):
         check()
         if all(s_ok[j:j + 3]) and sr[j] == sr[j + 2] and not any(s_cited[j:j + 3]):
@@ -256,16 +333,18 @@ def search(mw: list[str], sw: list[str], m_ok: list[bool], s_ok: list[bool],
                 if index_bytes + 160 * len(seen) + 4096 * len(nodes) > working_bytes:
                     raise SearchLimit("alignment-memory-limit", "Ordered alignment graph reached the working-memory budget.")
                 pair = frontier.pop()
-                successors = _neighbors(pair, mw, sw, mr, sr, m_ok, s_ok, m_cited, s_cited, 1)
+                successors = _neighbors(pair, mw, sw, mr, sr, m_ok, s_ok, m_cited, s_cited, 1, blocks)
                 # Remove only edges with an insertable equal pair between endpoints.
                 graph[pair] = tuple(sorted(p for p in successors if not any(
-                    q[0] < p[0] and q[1] < p[1] for q in successors)))
-                for neighbor in successors + _neighbors(pair, mw, sw, mr, sr, m_ok, s_ok, m_cited, s_cited, -1):
+                    (blocks.end(q) if blocks else q)[0] < p[0]
+                    and (blocks.end(q) if blocks else q)[1] < p[1] for q in successors)))
+                for neighbor in successors + _neighbors(pair, mw, sw, mr, sr, m_ok, s_ok, m_cited, s_cited, -1, blocks):
                     if neighbor not in nodes:
                         nodes.add(neighbor)
                         frontier.append(neighbor)
             for path in _paths(graph, check):
-                yield from _windows(path, check)
+                yield from _windows(path, check, m_cited=m_cited, s_cited=s_cited,
+                                    boundaries=blocks.boundaries if blocks else lambda first, last: True)
             seen.update(nodes)
 
 
@@ -359,6 +438,11 @@ def _long_quotes(text, ledger, headers=None):
     return [q and not h for q, h in zip(mask, headers)], _mask(ledger, sorted(uncertain))
 
 
+def _logical_units(text, ledger, headers, mapping):
+    return [(bisect_left(mapping, lo), bisect_left(mapping, hi))
+            for lo, hi in apa_units(text, ledger, headers)]
+
+
 def improved_report(manuscript: dict, sources: list[dict], *, config: dict | None = None,
                     exclude_quotes: bool = True, manuscript_scope: str = "abstract-onward",
                     load_document: Callable[[dict], dict] | None = None,
@@ -390,6 +474,7 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
     mw = [mt[i][0] for i in m_map]
     original_cited = citation_mask(text, mt, headers)
     m_cited = [original_cited[i] for i in m_map]
+    m_units = _logical_units(text, mt, headers, m_map)
     bib = _mask(mt, _intervals(manuscript))
     quoted, uncertain = _long_quotes(text, mt, headers)
     front = [False] * len(mt)
@@ -473,6 +558,7 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
         scored_paths: list[Path] = []
         audit_paths: list[Path] = []
         st = []
+        blocks = None
         phase = "scored"
         try:
             budget()
@@ -484,6 +570,7 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
             row.update(source_total_words=len(st), header_removed_words=sum(s_headers))
             source_cited = citation_mask(document["text"], st, s_headers)
             s_cited = [source_cited[i] for i in s_map]
+            s_units = _logical_units(document["text"], st, s_headers, s_map)
             row["citation_recognized_words"] = sum(s_cited)
             row["source_content_sha256"] = hashlib.sha256(document["text"].encode()).hexdigest()
             s_bib = _mask(st, _intervals(document))
@@ -504,12 +591,15 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
                     _collect(scored_paths, tuple(zip(range(a, e), range(b, f))), evidence_budget, budget)
             except ExactLimit as exc:
                 raise SearchLimit(exc.kind, exc.reason) from exc
+            if m_units and s_units:
+                blocks = _CitationBlocks(mw, sw, m_units, s_units, m_ok, s_exact, None, None)
             for path in search(mw, sw, m_hard, s_ok, budget, m_cited=m_cited, s_cited=s_cited,
                                m_skipped=m_skipped, s_skipped=s_skipped,
+                               citation_blocks=blocks,
                                working_bytes=WORKING_INDEX_BYTES):
-                if accepts_similar(path, mw, m_cited, s_cited):
+                if accepts_similar(path, mw, m_cited, s_cited, blocks):
                     _collect(scored_paths, path, evidence_budget, budget,
-                             lambda p: accepts_similar(p, mw, m_cited, s_cited))
+                             lambda p: accepts_similar(p, mw, m_cited, s_cited, blocks))
                 else:
                     rejected = content_details(path, mw, m_cited, s_cited)
                     stage = ("distinct-content" if rejected["distinct_matched_content_words"] < 4
@@ -522,13 +612,18 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
             if not all(m_ok) or not all(s_exact):
                 if audit_memory_exhausted:
                     raise SearchLimit("audit-memory-limit", "Optional excluded-text audit memory was exhausted; scored search is complete and unchanged.")
+                blocks = None
+                if m_units and s_units:
+                    blocks = _CitationBlocks(mw, sw, m_units, s_units,
+                                             [True] * len(mw), [True] * len(sw), None, None)
                 for path in search(mw, sw, [True] * len(mw), [True] * len(sw), budget,
-                                   m_cited=m_cited, s_cited=s_cited, working_bytes=WORKING_INDEX_BYTES):
+                                   m_cited=m_cited, s_cited=s_cited, citation_blocks=blocks,
+                                   working_bytes=WORKING_INDEX_BYTES):
                     ma, mb, sa, sb = path[0][0], path[-1][0] + 1, path[0][1], path[-1][1] + 1
                     if (any(not m_ok[a] or not s_exact[b] for a, b in path)
-                            and accepts_similar(path, mw, m_cited, s_cited)):
+                            and accepts_similar(path, mw, m_cited, s_cited, blocks)):
                         _collect(audit_paths, path, audit_budget, budget,
-                                 lambda p: accepts_similar(p, mw, m_cited, s_cited))
+                                 lambda p: accepts_similar(p, mw, m_cited, s_cited, blocks))
                 try:
                     for a, e, b, f in _exact_runs(mw, [True] * len(mw), [0] * len(mw), sw, [True] * len(sw),
                                                 [0] * len(sw), 9, budget):
@@ -626,6 +721,30 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
                 match["qualifying_aligned_pairs"] = [list(pair) for pair in original_path]
                 details = alignment_details(raw_pairs, mw, sw, m_cited, s_cited)
                 details.update(content_details(path, mw, m_cited, s_cited))
+                verified = blocks.verified_pairs(path) if blocks else set()
+                if kind == "similar":
+                    gaps_m = [b[0] - a[0] - 1 for a, b in zip(path, path[1:])]
+                    gaps_s = [b[1] - a[1] - 1 for a, b in zip(path, path[1:])]
+                    details.update(
+                        qualifying_matched_words=len(path),
+                        manuscript_density=info["manuscript_similarity"],
+                        source_density=info["source_similarity"],
+                        global_density=min(info["manuscript_similarity"], info["source_similarity"]),
+                        manuscript_gap_sequence=gaps_m, source_gap_sequence=gaps_s,
+                        maximum_gap=info["max_unmatched_run"], total_gap_words=sum(gaps_m + gaps_s),
+                        number_of_gaps=sum(bool(a or b) for a, b in zip(gaps_m, gaps_s)),
+                        citation_token_contribution={
+                            "similar_seed": 0, "similar_minimum": len(verified),
+                            "similar_density_numerator": len(verified), "gap_and_span_positions_preserved": True},
+                    )
+                details.update(
+                    qualifying_prose_words=sum(not (m_cited[a] or s_cited[b]) for a, b in path),
+                    verified_citation_words=len(verified),
+                    verified_citation_pairs=[[m_map[a], s_map[b]] for a, b in sorted(verified)],
+                    excluded_citation_pairs=[[m_map[a], s_map[b]] for a, b in raw_pairs
+                                             if (m_cited[a] or s_cited[b]) and (a, b) not in verified],
+                    matched_operator_words=sum(mw[a] in OPERATORS for a, _ in path),
+                )
                 details.update(manuscript_span=[ma, mb], source_span=[sa, sb],
                                logical_manuscript_span=[path[0][0], path[-1][0] + 1],
                                logical_source_span=[path[0][1], path[-1][1] + 1],

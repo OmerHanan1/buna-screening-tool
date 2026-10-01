@@ -1,5 +1,6 @@
 """Conservative citation masks in original token coordinates; no token deletion."""
 import re
+from bisect import bisect_left, bisect_right
 
 from buna.comparison import _CITATION, _mask
 
@@ -34,6 +35,8 @@ _YEARS = r"(?:18|19|20)\d{2}[a-z]?(?:\s*,\s*(?:(?:18|19|20)\d{2}[a-z]?|[a-z])){0
 _APA_NARRATIVE = re.compile(rf"(?<!\w){_AUTHORS}\s*\({_YEARS}(?:\s*;\s*{_YEARS}){{0,9}}\)")
 _APA_INLINE = re.compile(rf"(?<!\w){_AUTHORS}\s*,\s*{_YEARS}\b")
 _APA_ITEM = re.compile(rf"\s*(?:(?:see|also|e\.g\.,?|cf\.)\s+)*{_AUTHORS}\s*,?\s+{_YEARS}\s*")
+_APA_UNIT_ITEM = re.compile(
+    rf"\s*(?:(?:see|also|e\.g\.,?|cf\.)\s+)*(?P<unit>{_AUTHORS}\s*,?\s+{_YEARS})\s*")
 _APA_PARENS = re.compile(r"\([^()]{1,1000}\)")
 _NUMERIC_CITATION = re.compile(r"\[\s*\d+(?:\s*[,;–-]\s*\d+)*\s*\]")
 _NON_AUTHOR = frozenset(("study studies experiment experiments table figure anova ancova manova "
@@ -64,6 +67,7 @@ def improved_citation_mask(text, tokens, removed=None):
             first_words = [re.search(r"\w+", item).group().casefold() for item in items]
             if not any(word in _NON_AUTHOR for word in first_words):
                 intervals.append(match.span())
+    intervals.extend((tokens[lo][1], tokens[hi - 1][2]) for lo, hi in apa_units(text, tokens))
     merged = []
     for start, end in sorted(intervals):
         if merged and start <= merged[-1][1]:
@@ -72,3 +76,39 @@ def improved_citation_mask(text, tokens, removed=None):
             merged.append((start, end))
     mask = _mask(tokens, merged)
     return [c and not r for c, r in zip(mask, removed)] if removed is not None else mask
+
+
+def apa_units(text, tokens, removed=None):
+    """Complete author/year units, not a mask or an et-al/year fragment.
+
+    Unlike the broad exclusion mask, these credit candidates are recognized in
+    original text. Header words never disappear to manufacture an exact unit.
+    """
+    parentheses = list(_APA_PARENS.finditer(text))
+    intervals = []
+    for parent in parentheses:
+        offset = parent.start() + 1
+        for item in parent.group()[1:-1].split(";"):
+            match = _APA_UNIT_ITEM.fullmatch(item)
+            if match and re.match(r"\w+", match.group("unit")).group().casefold() not in _NON_AUTHOR:
+                a, b = match.span("unit")
+                intervals.append((offset + a, offset + b))
+            offset += len(item) + 1
+    parent_starts = [match.start() for match in parentheses]
+    for grammar in (_APA_NARRATIVE, _APA_INLINE):
+        for match in grammar.finditer(text):
+            index = bisect_right(parent_starts, match.start()) - 1
+            if index >= 0 and match.start() < parentheses[index].end():
+                continue
+            if re.match(r"\w+", match.group()).group().casefold() not in _NON_AUTHOR:
+                intervals.append(match.span())
+    starts, ends = [t[1] for t in tokens], [t[2] for t in tokens]
+    units = []
+    for a, b in sorted(set(intervals), key=lambda span: (span[0], -span[1])):
+        lo, hi = bisect_right(ends, a), bisect_left(starts, b)
+        if lo == hi or (removed is not None and any(removed[lo:hi])):
+            continue
+        if units and lo < units[-1][1]:
+            continue
+        units.append((lo, hi))
+    return units

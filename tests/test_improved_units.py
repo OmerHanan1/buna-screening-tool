@@ -1,10 +1,13 @@
 """Synthetic staged operator/citation/edge fixtures; no private-paper text."""
 import pytest
+import itertools
 
 from buna.classified import tokens as old_tokens
 from buna.documents import _structure
 from buna.improved_eng import _content, improved_report
 from buna.improved_tokens import tokens
+from buna.citation_tokens import apa_units, improved_citation_mask
+from buna.improved_eng import _CitationBlocks, search
 
 
 def doc(text):
@@ -86,3 +89,109 @@ def test_exact_operators_count_in_both_sides_and_denominator(operator):
     assert result["matches"][0]["source"]["text"] == phrase
     changed = phrase.replace(operator, {"=": "<", "<": ">", ">": "\u2248", "\u2248": "="}[operator])
     assert not compare(phrase, changed)["matches"]
+
+
+@pytest.mark.parametrize("citation", [
+    "(Gan et al., 2024)", "(J. R. Smith & K. Jones, 2005a)", "Smith et al. (2005)",
+    "(Smith, J. R., & Jones, K., 2005)", "(van Dijk & de la Cruz, 2005)",
+])
+def test_complete_citation_unit_can_supply_nine_but_not_meaningful_words(citation):
+    target = f"alpha beta gamma {citation} delta x epsilon"
+    source = f"alpha beta gamma {citation} delta y epsilon"
+    result = compare(target, source)
+    match = next(m for m in result["matches"] if m["match_kind"] == "similar")
+    expected = len(tokens(citation))
+    assert match["diagnostics"]["verified_citation_words"] == expected
+    assert match["diagnostics"]["qualifying_prose_words"] == 5
+    assert match["diagnostics"]["distinct_matched_content_words"] == 5
+    assert match["matched_words"] == 5 + expected
+    assert match["diagnostics"]["seed"]["words"] == ["alpha", "beta", "gamma"]
+    assert match["diagnostics"]["manuscript_density"] == (5 + expected) / (6 + expected)
+
+
+@pytest.mark.parametrize("different", ["Bell et al., 2005", "Moll et al., 2006", "Moll et al., 2005b"])
+def test_partial_citation_authors_or_years_cannot_qualify(different):
+    target = "alpha beta gamma (Moll et al., 2005) delta x epsilon"
+    source = f"alpha beta gamma ({different}) delta y epsilon"
+    assert not compare(target, source)["matches"]
+
+
+def test_complete_identical_unit_inside_different_lists_qualifies_independently():
+    target = "alpha beta gamma (Gan et al., 2024; Bell et al., 2005) delta x epsilon"
+    source = "alpha beta gamma (Gan et al., 2024; Moll et al., 2005) delta y epsilon"
+    result = compare(target, source)
+    match = next(m for m in result["matches"] if m["match_kind"] == "similar")
+    assert match["diagnostics"]["verified_citation_words"] == 4
+    assert match["matched_words"] == 9
+    assert match["diagnostics"]["maximum_gap"] == 4
+    assert all(a not in range(7, 11) for a, b in match["qualifying_aligned_pairs"])
+
+
+def test_identical_units_do_not_enable_citation_only_similar_seeds():
+    target = "(Gan et al., 2024) alpha x beta y gamma z delta w epsilon"
+    source = "(Gan et al., 2024) alpha q beta r gamma s delta t epsilon"
+    assert not compare(target, source)["matches"]
+    exact = "(Gan et al., 2024; Luo et al., 2013; Smith 2005)"
+    assert compare(exact, exact)["metrics"]["exact_words"] == len(tokens(exact))
+
+
+def test_apa_units_cannot_stitch_across_headers_or_long_quotes():
+    text = "Smith REMOVED HEADER et al. (2005)"
+    ledger = tokens(text)
+    assert not apa_units(text, ledger, [i in (1, 2) for i in range(len(ledger))])
+    target = 'alpha beta gamma "Gan et al., 2024" delta x epsilon'
+    source = 'alpha beta gamma "Gan et al., 2024" delta y epsilon'
+    assert not compare(target, source)["matches"]
+
+
+def test_atomic_citation_paths_never_emit_a_partial_unit():
+    target = "alpha beta gamma (Gan et al., 2024) delta x epsilon zeta eta"
+    source = "alpha beta gamma (Gan et al., 2024) delta y epsilon zeta eta"
+    mt, st = tokens(target), tokens(source)
+    mw, sw = [t[0] for t in mt], [t[0] for t in st]
+    mc, sc = improved_citation_mask(target, mt), improved_citation_mask(source, st)
+    blocks = _CitationBlocks(mw, sw, apa_units(target, mt), apa_units(source, st),
+                             [True] * len(mw), [True] * len(sw), None, None)
+    for path in search(mw, sw, [True] * len(mw), [True] * len(sw), lambda: None,
+                       m_cited=mc, s_cited=sc, citation_blocks=blocks):
+        assert {p for p in path if mc[p[0]] or sc[p[1]]} == blocks.verified_pairs(path)
+
+
+def test_atomic_units_against_independent_exhaustive_pair_oracle():
+    from test_improved_eng import oracle
+    for left, right in itertools.product(("eta theta", "eta eta", "theta eta"), repeat=2):
+        target = "alpha beta gamma (Smith 2005) delta epsilon " + left
+        source = "alpha beta gamma (Smith 2005) delta epsilon " + right
+        mt, st = tokens(target), tokens(source)
+        mw, sw = [t[0] for t in mt], [t[0] for t in st]
+        mc, sc = improved_citation_mask(target, mt), improved_citation_mask(source, st)
+        blocks = _CitationBlocks(mw, sw, apa_units(target, mt), apa_units(source, st),
+                                 [True] * len(mw), [True] * len(sw), None, None)
+        expected = []
+        unit_pairs = {(3, 3), (4, 4)}
+        for path in oracle(mw, sw):
+            citation_pairs = {p for p in path if mc[p[0]] or sc[p[1]]}
+            if citation_pairs and citation_pairs != unit_pairs:
+                continue
+            prose_seed = any(
+                path[k:k + 3] == tuple((path[k][0] + offset, path[k][1] + offset) for offset in range(3))
+                and all(not mc[a] and not sc[b] for a, b in path[k:k + 3])
+                for k in range(len(path) - 2))
+            if prose_seed:
+                expected.append(path)
+        actual = list(search(mw, sw, [True] * len(mw), [True] * len(sw), lambda: None,
+                             m_cited=mc, s_cited=sc, citation_blocks=blocks))
+        assert all(path in expected for path in actual)
+        assert {pair for path in actual for pair in path} == {pair for path in expected for pair in path}
+
+
+def test_full_multi_author_unit_cannot_be_replaced_by_equal_suffix():
+    target = "alpha beta gamma (Moll, Bell, and Smith, 2005) delta x epsilon"
+    source = "alpha beta gamma (Other, Bell, and Smith, 2005) delta y epsilon"
+    assert not compare(target, source)["matches"]
+    text = "(e.g., Feinberg et al., 2014; Olatunji et al., 2017)"
+    ledger = tokens(text)
+    units = apa_units(text, ledger)
+    assert [[w for w, *_ in ledger[a:b]] for a, b in units] == [
+        ["feinberg", "et", "al", "2014"], ["olatunji", "et", "al", "2017"],
+    ]

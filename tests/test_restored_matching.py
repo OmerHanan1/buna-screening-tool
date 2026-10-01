@@ -127,27 +127,34 @@ def test_exact_citation_exception_is_explicit_and_unchanged():
     assert "applies to Similar" in exact["diagnostics"]["exact_citation_policy"]
 
 
-def test_seven_prose_plus_two_citations_exact_accepts_similar_rejects():
+def test_seven_prose_plus_identical_complete_citation_now_qualifies_similar():
     phrase = "one two three four (Smith 2020) five six seven"
     exact = compare(phrase, phrase)
     assert exact["metrics"]["exact_words"] == 9
     assert exact["metrics"]["overlapping_words"] == 9
     flexible = compare(phrase.replace("five", "x five"), phrase.replace("five", "y five"))
-    assert flexible["metrics"]["overlapping_words"] == 0
+    assert flexible["metrics"]["overlapping_words"] == 9
+    assert flexible["matches"][0]["diagnostics"]["verified_citation_words"] == 2
+    assert flexible["matches"][0]["diagnostics"]["qualifying_prose_words"] == 7
 
 
-def test_raw_citation_equal_pairs_never_shorten_qualifying_gaps():
+def test_verified_complete_citation_pairs_shorten_gap_but_never_partial_fragments():
     m = "alpha beta gamma delta (Smith 2020) x epsilon zeta eta theta iota"
     s = "alpha beta gamma delta (Smith 2020) y epsilon zeta eta theta iota"
     result = compare(m, s)
     match = next(item for item in result["matches"] if item["match_kind"] == "similar")
-    assert len(match["qualifying_aligned_pairs"]) == 9
+    assert len(match["qualifying_aligned_pairs"]) == 11
     assert len(match["raw_aligned_pairs"]) == 11
-    assert match["matched_words"] == match["diagnostics"]["matched_word_count"] == 9
+    assert match["matched_words"] == match["diagnostics"]["matched_word_count"] == 11
     assert match["diagnostics"]["citation_matches"]["count"] == 2
-    assert match["diagnostics"]["maximum_gap"] == 3
-    assert match["diagnostics"]["manuscript_density"] == 9 / 12
-    assert match["scored_word_positions"] == [0, 1, 2, 3, 7, 8, 9, 10, 11]
+    assert match["diagnostics"]["maximum_gap"] == 1
+    assert match["diagnostics"]["manuscript_density"] == 11 / 12
+    assert match["scored_word_positions"] == [0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11]
+    partial = compare(m, s.replace("Smith", "Jones"))
+    similar = next(item for item in partial["matches"] if item["match_kind"] == "similar")
+    assert similar["diagnostics"]["maximum_gap"] == 3
+    assert similar["diagnostics"]["verified_citation_words"] == 0
+    assert similar["matched_words"] == 9
 
 
 def test_small_exhaustive_citation_oracle_keeps_alternative_legal_paths():
