@@ -5,6 +5,23 @@ New comparisons use model ID `improvedEng`, algorithm version
 milestone rather than tuning v2. Standard remains the default; the other engines
 are unchanged. Saved v1/v2 reports retain their own rules and values.
 
+## Retained evidence and scoring priority
+
+`live-retained-scored-priority-v1` keeps the total estimated evidence ceiling at
+64 MiB: 56 MiB is protected for scored evidence and 8 MiB is reserved for the
+optional excluded-text audit. Replaced temporary paths release their own
+reservations. Materialized records retain their reservation, while the consumed
+temporary path releases its reservation; construction overlap is still charged.
+The counters measure retained representations, not the cumulative history of all
+discarded candidates.
+
+An exhausted optional audit cannot consume the scored reserve or turn an otherwise
+fully checked source into a partial scored result. Audit incompleteness remains
+explicit in warnings and `audit_complete`; genuine scored-evidence exhaustion
+still produces partial coverage and a lower-bound score. JSON records separate
+scored/audit limits, current reservations, peaks and failure reasons. This changes
+resource accounting, not matching thresholds, eligible words or accepted evidence.
+
 ## Restored matching rules
 
 Similar matching again uses overlapping exact **three-word retrieval seeds**,

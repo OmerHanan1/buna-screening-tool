@@ -212,13 +212,26 @@ def _contains(outer: Path, inner: Path) -> bool:
 
 
 class _Evidence:
-    def __init__(self):
+    def __init__(self, limit=None, label="Retained evidence"):
         self.bytes = 0
+        self.peak_bytes = 0
+        self.limit = MAX_EVIDENCE_BYTES if limit is None else limit
+        self.label = label
 
     def add(self, size: int):
-        if self.bytes + size > MAX_EVIDENCE_BYTES:
-            raise SearchLimit("evidence-memory-limit", "Retained evidence reached its memory budget; findings are partial.")
+        if self.bytes + size > self.limit:
+            raise SearchLimit("evidence-memory-limit", f"{self.label} reached its bounded memory budget; retained evidence is partial.")
         self.bytes += size
+        self.peak_bytes = max(self.peak_bytes, self.bytes)
+
+    def release(self, size: int):
+        if not 0 <= size <= self.bytes:
+            raise RuntimeError("Evidence memory accounting is inconsistent.")
+        self.bytes -= size
+
+
+def _path_bytes(path: Path) -> int:
+    return 512 + len(path) * 192
 
 
 def _collect(paths: list[Path], candidate: Path, budget: _Evidence, check: Callable[[], None]) -> None:
@@ -229,11 +242,17 @@ def _collect(paths: list[Path], candidate: Path, budget: _Evidence, check: Calla
         if _contains(old, candidate):
             return
     # Reserve before modifying retained evidence so interrupted work stays valid.
-    budget.add(512 + len(candidate) * 192)
+    budget.add(_path_bytes(candidate))
     def exact(path):
         return len(path) == path[-1][0] - path[0][0] + 1 == path[-1][1] - path[0][1] + 1
 
-    paths[:] = [old for old in paths if not _contains(candidate, old) or (exact(old) and not exact(candidate))]
+    kept = []
+    for old in paths:
+        if not _contains(candidate, old) or (exact(old) and not exact(candidate)):
+            kept.append(old)
+        else:
+            budget.release(_path_bytes(old))
+    paths[:] = kept
     paths.append(candidate)
 
 
@@ -285,7 +304,10 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
     numbers = {str(s.get("id", f"source-{i + 1}")): s.get("source_number", i + 1) for i, s in enumerate(sources)}
     ordered = sorted(enumerate(sources), key=lambda item: str(item[1].get("id", f"source-{item[0] + 1}")))
     coverage, matches, raw = [], [], []
-    evidence_budget = _Evidence()
+    audit_limit = MAX_EVIDENCE_BYTES // 8
+    evidence_budget = _Evidence(MAX_EVIDENCE_BYTES - audit_limit, "Scored comparison evidence")
+    audit_budget = _Evidence(audit_limit, "Optional excluded-text audit evidence")
+    audit_memory_exhausted = False
     exact_words: dict[str, set[int]] = defaultdict(set)
     similar_words: dict[str, set[int]] = defaultdict(set)
 
@@ -372,21 +394,26 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
             # Audit work must not consume the rest of the budget for later sources.
             audit_deadline = min(started + fair_seconds, time.monotonic() + fair_seconds * 0.1)
             if not all(eligible) or not all(s_ok):
+                if audit_memory_exhausted:
+                    raise SearchLimit("audit-memory-limit", "Optional excluded-text audit memory was exhausted; scored search is complete and unchanged.")
                 for path in search(mw, sw, [True] * len(mw), [True] * len(sw), budget,
                                    m_cited=m_cited, s_cited=s_cited, working_bytes=WORKING_INDEX_BYTES):
                     ma, mb, sa, sb = path[0][0], path[-1][0] + 1, path[0][1], path[-1][1] + 1
                     if not all(eligible[ma:mb]) or not all(s_ok[sa:sb]):
-                        _collect(audit_paths, path, evidence_budget, budget)
+                        _collect(audit_paths, path, audit_budget, budget)
                 try:
                     for a, e, b, f in _exact_runs(mw, [True] * len(mw), [0] * len(mw), sw, [True] * len(sw),
                                                 [0] * len(sw), 9, budget):
                         path = tuple(zip(range(a, e), range(b, f)))
                         if not all(eligible[a:e]) or not all(s_ok[b:f]):
-                            _collect(audit_paths, path, evidence_budget, budget)
+                            _collect(audit_paths, path, audit_budget, budget)
                 except ExactLimit as exc:
                     raise SearchLimit(exc.kind, exc.reason) from exc
             row["audit_search_complete"] = True
         except SearchLimit as exc:
+            if phase == "audit" and exc.kind in {"evidence-memory-limit", "audit-memory-limit"}:
+                audit_memory_exhausted = True
+            row["audit_limit_reason" if phase == "audit" else "scored_limit_reason"] = exc.reason
             row.update(reason=exc.reason, incomplete_stage=phase)
             row["limits_reached"].append(exc.kind)
             if not row["scored_search_complete"]:
@@ -395,7 +422,10 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
                 warnings.append(f"Source {sid}: excluded-text audit incomplete ({exc.kind}); scored search completed.")
 
         for excluded, paths in ((False, scored_paths), (True, audit_paths)):
-            for path in sorted(paths):
+            retained_budget = audit_budget if excluded else evidence_budget
+            paths.sort(reverse=True)
+            while paths:
+                path = paths.pop()
                 check()
                 m_positions, s_positions = [p[0] for p in path], [p[1] for p in path]
                 ma, mb, sa, sb = path[0][0], path[-1][0] + 1, path[0][1], path[-1][1] + 1
@@ -403,16 +433,23 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
                 kind = "exact" if info["matched_words"] == info["manuscript_span"] == info["source_span"] else "similar"
                 # Reserve strings and offset arrays before materializing the report.
                 try:
-                    evidence_budget.add(10240 + 768 * len(path) + 8 * (
+                    retained_budget.add(10240 + 768 * len(path) + 8 * (
                         mt[mb - 1][2] - mt[ma][1] + st[sb - 1][2] - st[sa][1]))
                 except SearchLimit as exc:
+                    row["audit_limit_reason" if excluded else "scored_limit_reason"] = exc.reason
                     if not excluded:
                         row.update(status="compared-with-limits", scored_search_complete=False)
                     else:
                         row["audit_search_complete"] = False
+                        audit_memory_exhausted = True
+                        warnings.append(f"Source {sid}: optional excluded-text evidence incomplete; scored evidence is unchanged.")
                     row.update(reason=exc.reason, incomplete_stage="evidence")
                     if exc.kind not in row["limits_reached"]:
                         row["limits_reached"].append(exc.kind)
+                    retained_budget.release(_path_bytes(path))
+                    for pending_path in paths:
+                        retained_budget.release(_path_bytes(pending_path))
+                    paths.clear()
                     break
                 passage, attribution = _attribution(manuscript, mt, source, m_positions, quoted, uncertain)
                 m_side = _side(manuscript, mt, m_positions, ma, mb - 1)
@@ -453,6 +490,7 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
                     "scored": not excluded,
                 }
                 (raw if excluded else matches).append(match)
+                retained_budget.release(_path_bytes(path))
                 if not excluded:
                     (exact_words if kind == "exact" else similar_words)[sid].update(m_positions)
                     row[kind + "_matches"] += 1
@@ -524,6 +562,7 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
                     "gap_and_span_accounting": "Original word positions, including intervening citations",
                 },
                 "normalization_version": NORMALIZATION_VERSION, "source_time_limit_seconds": source_seconds,
+                "evidence_memory_policy": "live-retained-scored-priority-v1",
                 "total_time_limit_seconds": total_time_limit_seconds, "working_index_limit_mib": 128}
     return {
         "algorithm_version": VERSION, "comparison_model": MODEL_ID, "settings": settings, "metrics": metrics,
@@ -536,6 +575,14 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
                            "metrics": metrics, "coverage_intervals": intervals,
                            "labels": {"similar": "Ordered equal wording with gaps; no reordering or semantic matching."}},
         "improved_eng": {"config": asdict(cfg), "raw_excluded_evidence": raw,
+                         "evidence_memory": {
+                             "combined_limit_bytes": MAX_EVIDENCE_BYTES,
+                             "scored": {"limit_bytes": evidence_budget.limit, "retained_bytes": evidence_budget.bytes,
+                                        "peak_bytes": evidence_budget.peak_bytes},
+                             "excluded_audit": {"limit_bytes": audit_budget.limit, "retained_bytes": audit_budget.bytes,
+                                                "peak_bytes": audit_budget.peak_bytes, "exhausted": audit_memory_exhausted},
+                             "policy": "Scored evidence has a protected seven-eighths share; optional excluded audit has one eighth. Replaced and materialized temporary paths release their reservations.",
+                         },
                          "manuscript_ledger_sha256": ledger_sha256(mt),
                          "similar_diagnostics": [m["diagnostics"] for m in matches + raw if m["match_kind"] == "similar"],
                          "alignment_diagnostics": [m["diagnostics"] for m in matches + raw],

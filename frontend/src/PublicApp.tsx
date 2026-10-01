@@ -478,7 +478,7 @@ export default function PublicApp() {
         {!gateReady && !loadingLibrary && <button className="hosted-text-button" onClick={() => window.location.reload()}>Retry connection</button>}
         <p className="hosted-entry-note">Email ownership is not verified. Anyone who knows an allowed email can enter. Each visit has a separate workspace.</p>
       </> : <>
-        <div className="hosted-title"><h1>{job?.status === "complete" ? "Comparison report" : job ? "Your comparison" : "New comparison"}</h1>
+        <div className="hosted-title"><h1>{job?.status === "complete" ? job.partial ? "Partial comparison report" : "Comparison report" : job ? "Your comparison" : "New comparison"}</h1>
           <p>{job?.status === "complete" ? "Review the annotated manuscript and matching source passages." : "Upload your manuscript. Get an annotated PDF of matching passages."}</p></div>
         {error && <p role="alert" className="hosted-error">{error}</p>}
         {loadingLibrary && <p role="status" className="hosted-loading"><LoaderCircle className="hosted-spin" size={15} />Loading comparison papers…</p>}

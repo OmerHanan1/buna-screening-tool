@@ -19,6 +19,7 @@
 !deploy/verify_pdf_sources.py
 !deploy/verify_eligible_policy.py
 !deploy/verify_improved_eng.py
+!deploy/verify_evidence_budget.py
 !release-context
 !release-context/wheels
 !release-context/wheels/*.whl

@@ -401,6 +401,8 @@ test("expired sessions and partial/no-score results stay explicit", async ({ pag
   await page.getByRole("checkbox", { name: /authorized to upload/ }).check();
   await page.getByRole("button", { name: "Compare papers", exact: true }).click();
   complete = true;
+  await expect(page.getByRole("heading", { name: "Partial comparison report", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Comparison report", exact: true })).toHaveCount(0);
   await expect(page.getByText("Not assessed", { exact: true })).toBeVisible();
   await expect(page.getByText(/Comparison incomplete. No score is available/)).toBeVisible();
   await expect(page.getByText(/Abstract heading not detected/)).toBeVisible();
