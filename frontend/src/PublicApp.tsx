@@ -38,7 +38,7 @@ export default function PublicApp() {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [consent, setConsent] = useState(false);
-  const [model, setModel] = useState("validated-lexical");
+  const [model, setModel] = useState("improvedEng");
   const [loadingLibrary, setLoadingLibrary] = useState(true);
   const [entered, setEntered] = useState(false);
   const [email, setEmail] = useState("");
@@ -67,7 +67,7 @@ export default function PublicApp() {
       const data = await response.json().catch(() => ({}));
       if (response.status === 401) {
         setEntered(false); token.current = ""; setJob(null); setPapers([]); setSelected([]);
-        setModel("validated-lexical");
+        setModel("improvedEng");
         const message = "This workspace expired or the service restarted. Enter your email to start a new one.";
         setError(message);
         throw new Error(message);
@@ -323,7 +323,7 @@ export default function PublicApp() {
     setKeepSources(new Set()); setSharedAvailable(false); setLibraryWarning("");
     sourceSavesRef.current = new Map(); setSourceSaves(new Map()); libraryRef.current = [];
     sourcesRef.current = []; uploadsRef.current = new Map(); setUploads(new Map());
-    setModel("validated-lexical");
+    setModel("improvedEng");
   }
   async function chooseTarget(file: File) {
     if (busy) return;
@@ -434,7 +434,7 @@ export default function PublicApp() {
     try {
       const value = await (await request(`/jobs/${job.id}`, { method: "DELETE" })).json();
       setJob(value.status === "deleted" ? null : { ...job, status: value.status });
-      if (value.status === "deleted") { submission.current = null; setModel("validated-lexical"); }
+      if (value.status === "deleted") { submission.current = null; setModel("improvedEng"); }
     } catch (e) { setError((e as Error).message); }
   }
   async function retrySharedSave() {
@@ -456,7 +456,7 @@ export default function PublicApp() {
       if (uploadsRef.current.size) await request("/source-uploads", { method: "DELETE" });
     } catch (e) { setError((e as Error).message); return; }
     submission.current = null;
-    setModel("validated-lexical");
+    setModel("improvedEng");
     setJob(null); setTarget(null); setSources([]); setConsent(false); setError(""); setFileError(""); setSourceError("");
     setKeepSources(new Set());
     sourceSavesRef.current = new Map(); setSourceSaves(new Map());

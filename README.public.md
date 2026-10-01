@@ -56,11 +56,12 @@ validation, incomplete results and expired-session errors remain visible.
 An optional **Advanced → Exact + similar wording (experimental)** model separates
 contiguous exact wording from bounded edits/reordering. Experimental PDFs use
 rose **E** and amber **S** markers with source-numbered annotation titles; color
-is not the only cue. The standard model remains the default. Scores and
+is not the only cue. **improvedEng is the default for new comparisons**; Standard
+and the classified model remain explicitly selectable. Scores and
 normalization can differ, and no superiority or vendor-equivalence claim is made.
 See [the model and limitations](docs/experimental-wording.md).
 
-A third optional **Advanced > improvedEng** model keeps exact matching separate
+The default **Advanced > improvedEng** model keeps exact matching separate
 from the restored flexible ordered-alignment Similar path: three-word retrieval
 seeds, at least nine non-citation matched words, gaps at most five and global
 density at least 60% independently per side. Citation positions remain in gaps

@@ -541,7 +541,9 @@ test(`${model} requires explicit selection and resets for a new comparison`, asy
   await page.getByLabel("Email address").fill("fixture@example.org");
   await page.getByRole("button", { name: "Continue", exact: true }).click();
   await expect(page.getByRole("heading", { name: "44 papers selected" })).toBeVisible();
-  await page.getByText("Advanced", { exact: true }).click();
+  await page.locator(".hosted-model-details summary").click();
+  await expect(page.getByLabel("Comparison model")).toHaveValue("improvedEng");
+  await page.getByLabel("Comparison model").selectOption("validated-lexical");
   await expect(page.getByLabel("Comparison model")).toHaveValue("validated-lexical");
   await page.getByLabel("Comparison model").selectOption(model);
   await expect(page.getByText(model === "improvedEng" ? /Experimental: Similar requires nine eligible equal units/ : /Experimental: separates exact wording/)).toBeVisible();
@@ -562,8 +564,8 @@ test(`${model} requires explicit selection and resets for a new comparison`, asy
   }
   page.on("dialog", dialog => dialog.accept());
   await page.getByRole("button", { name: "New comparison", exact: true }).click();
-  await page.getByText("Advanced", { exact: true }).click();
-  await expect(page.getByLabel("Comparison model")).toHaveValue("validated-lexical");
+  await page.locator(".hosted-model-details summary").click();
+  await expect(page.getByLabel("Comparison model")).toHaveValue("improvedEng");
 });
 }
 

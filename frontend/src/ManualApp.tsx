@@ -7,7 +7,7 @@ import type { ReaderReport } from "./reader-types";
 import type { CollectionList, LibraryCollection } from "./collections";
 
 interface LocalPaper extends Paper { filename?: string; parsed?: boolean; upload_failed?: boolean; excluded?: boolean; exclusion_reason?: string; library_paper_id?: string }
-export interface LocalJob extends Job { workflow: string; filename?: string; papers: LocalPaper[] }
+export interface LocalJob extends Job { workflow: string; filename?: string; papers: LocalPaper[]; comparison_settings?: { comparison_model?: string; exclude_quotes?: boolean } }
 
 export default function ManualApp() {
   const [job, setJob] = useState<LocalJob | null>(null);
@@ -17,7 +17,7 @@ export default function ManualApp() {
   const [saved, setSaved] = useState<LocalJob[]>([]);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [excludeQuotes, setExcludeQuotes] = useState(true);
-  const [comparisonModel, setComparisonModel] = useState("validated-lexical");
+  const [comparisonModel, setComparisonModel] = useState("improvedEng");
   const [engineVersion, setEngineVersion] = useState("");
   const [libraryEnabled, setLibraryEnabled] = useState(false);
   const [libraryOpen, setLibraryOpen] = useState(false);
@@ -83,7 +83,7 @@ export default function ManualApp() {
   }
   function reset() {
     setJob(null); setReport(null); setError(""); setHistoryOpen(false); setEditSource("");
-    setExcludeQuotes(true); setComparisonModel("validated-lexical"); setShowFiles(8);
+    setExcludeQuotes(true); setComparisonModel("improvedEng"); setShowFiles(8);
     setCollectionNotice(""); setCollectionPapers([]); setCollectionId(""); setNewComparison(value => value + 1);
   }
   async function uploadTarget(file: File) {
@@ -127,6 +127,8 @@ export default function ManualApp() {
         const value = await api<LocalJob>(`/jobs/${item.id}`);
         if (value.workflow !== "manual") throw new Error("This is not a manual comparison.");
         setReport(null); setJob(value); setHistoryOpen(false); setCollectionId(""); setCollectionNotice("");
+        setComparisonModel(value.comparison_settings?.comparison_model ?? "improvedEng");
+        setExcludeQuotes(value.comparison_settings?.exclude_quotes ?? true);
       })}><span>{item.filename || item.title}</span><small>{new Date(item.created_at).toLocaleDateString()} · {item.status}</small></button>)}
       {saved.length > 30 && <p className="muted">Showing the 30 most recent comparisons.</p>}
     </section>}

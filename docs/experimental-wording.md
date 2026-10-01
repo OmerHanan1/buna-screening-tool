@@ -1,8 +1,10 @@
 # Exact + similar wording (experimental)
 
 The hosted **Advanced** control offers `classified-v1.1` as an explicit opt-in.
-The default remains **Standard wording comparison** (`validated-lexical`, engine
-2.5.4). Starting a new comparison resets the selector to the standard model.
+The default is **improvedEng**. **Standard wording comparison** (`validated-lexical`,
+engine 2.5.4) and `classified-v1.1` remain explicitly selectable. Starting a new
+comparison resets the selector to improvedEng; this does not change the rules or
+scores of either model.
 Existing reports, source extracts and comparisons are not relabeled or rerun.
 
 ## Labels and scoring

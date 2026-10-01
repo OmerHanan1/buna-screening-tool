@@ -1,7 +1,7 @@
 # improvedEng: ordered alignment with precision exclusions
 
 New comparisons use model ID `improvedEng`, algorithm version
-`improvedEng-v3.2-precision`. Standard remains the default; Standard 2.5.4 and
+`improvedEng-v3.2-precision`. improvedEng is the default for new comparisons; Standard 2.5.4 and
 classified-v1.1 matching and denominator behavior are unchanged. Saved reports
 retain their original rules and values; neither library caches nor historical
 reports are rewritten or replayed.
