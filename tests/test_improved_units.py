@@ -291,3 +291,13 @@ def test_trimmed_atomic_paths_equal_exhaustive_reference_pair_union():
             if accepts_similar(path, mw, mc, sc, blocks):
                 actual.update(path)
         assert actual == expected
+
+
+def test_exact_exception_diagnostics_do_not_label_scored_citation_fragments_excluded():
+    result = compare("(Moll et al., 2005) alpha beta gamma delta epsilon zeta eta",
+                     "(Bell et al., 2005) alpha beta gamma delta epsilon zeta eta")
+    exact = next(match for match in result["matches"] if match["match_kind"] == "exact")
+    assert exact["matched_words"] == 10
+    assert exact["diagnostics"]["exact_citation_words"] == 3
+    assert exact["diagnostics"]["verified_citation_words"] == 0
+    assert exact["diagnostics"]["excluded_citation_pairs"] == []

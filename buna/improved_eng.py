@@ -783,10 +783,11 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
                     )
                 details.update(
                     qualifying_prose_words=sum(not (m_cited[a] or s_cited[b]) for a, b in path),
+                    exact_citation_words=sum(m_cited[a] or s_cited[b] for a, b in path) if kind == "exact" else 0,
                     verified_citation_words=len(verified),
                     verified_citation_pairs=[[m_map[a], s_map[b]] for a, b in sorted(verified)],
                     excluded_citation_pairs=[[m_map[a], s_map[b]] for a, b in raw_pairs
-                                             if (m_cited[a] or s_cited[b]) and (a, b) not in verified],
+                                             if kind == "similar" and (m_cited[a] or s_cited[b]) and (a, b) not in verified],
                     matched_operator_words=sum(mw[a] in OPERATORS for a, _ in path),
                 )
                 details.update(manuscript_span=[ma, mb], source_span=[sa, sb],
