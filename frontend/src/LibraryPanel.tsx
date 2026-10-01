@@ -148,7 +148,7 @@ export default function LibraryPanel({ job, locked, onAttached, onClose }: {
       <button disabled={Boolean(busy)} onClick={() => setRetryPaper(null)}>Cancel retry</button>
     </section>}
     <details className="library-local"><summary>Save local files to the library</summary>
-      <p>PDF or UTF-8 text, up to 32 MiB, 600 PDF pages and 2 million extracted characters per source. No network requests. Scanned PDFs need OCR first. Ready means parsed, not fully compared.</p>
+      <p>PDF or UTF-8 text, up to 40 MiB, 600 PDF pages and 2 million extracted characters per source. No network requests. Scanned PDFs need OCR first. Ready means parsed, not fully compared.</p>
       <label>Optional DOI for a single file<input aria-label="Local file DOI" value={uploadDoi} onChange={event => setUploadDoi(event.target.value)} /></label>
       <label>Save local papers<input aria-label="Save local papers" type="file" multiple accept=".pdf,.txt" disabled={Boolean(busy)}
         onChange={event => {

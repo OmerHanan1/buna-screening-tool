@@ -2,15 +2,17 @@ import { useEffect, useRef, useState } from "react";
 import { Check, FileText, Search, Upload, X } from "lucide-react";
 
 export type HostedPaper = { sha256: string; title: string; attribution: string; license: string; license_url: string; version: string; library_version?: string; storage_kind?: "bundled" | "shared" };
+export const MAX_FILE_MIB = 40;
+export const MAX_BATCH_BYTES = 128 * 1024 * 1024;
 
 export function fileSize(bytes: number) {
-  return bytes < 1024 * 1024 ? `${Math.max(1, Math.round(bytes / 1024))} KB` : `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return bytes < 1024 * 1024 ? `${Math.max(1, Math.round(bytes / 1024))} KiB` : `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
 }
 
-export async function validateFile(file: File, maximumMiB: number): Promise<string> {
+export async function validateFile(file: File): Promise<string> {
   if (!/\.(pdf|txt)$/i.test(file.name)) return "Choose a PDF or a plain-text file.";
   if (!file.size) return "This file is empty. Choose another file.";
-  if (file.size > maximumMiB * 1024 * 1024) return `This file exceeds the ${maximumMiB} MB limit.`;
+  if (file.size > MAX_FILE_MIB * 1024 * 1024) return `This file exceeds the ${MAX_FILE_MIB} MiB limit.`;
   if (/\.pdf$/i.test(file.name)) {
     const header = new TextDecoder().decode(await file.slice(0, 5).arrayBuffer());
     if (header !== "%PDF-") return "This file does not contain a valid PDF header.";
@@ -35,7 +37,7 @@ export function ManuscriptInput({ file, error, onFile, onRemove }: {
     </div> : <button type="button" className={`hosted-dropzone ${dragging ? "is-dragging" : ""}`}
       onClick={() => input.current?.click()} onDragOver={e => { e.preventDefault(); setDragging(true); }}
       onDragLeave={() => setDragging(false)} onDrop={e => { e.preventDefault(); setDragging(false); if (e.dataTransfer.files[0]) onFile(e.dataTransfer.files[0]); }}>
-      <Upload size={22} aria-hidden="true" /><strong>Choose your manuscript</strong><span>or drop it here · PDF or text, up to 10 MB</span>
+      <Upload size={22} aria-hidden="true" /><strong>Choose your manuscript</strong><span>or drop it here · PDF or text, up to {MAX_FILE_MIB} MiB</span>
     </button>}
     {error && <p role="alert" className="hosted-field-error">{error}</p>}
   </div>;

@@ -168,12 +168,12 @@ class Collections:
                                     raise LibraryError("Staged file is not a regular file.", 422)
                                 size = os.fstat(stream.fileno()).st_size
                                 if size > MAX_SOURCE_UPLOAD:
-                                    raise LibraryError("Staged file exceeds the 32 MiB source limit.", 422)
+                                    raise LibraryError(f"Staged file exceeds the {MAX_SOURCE_UPLOAD // (1024 * 1024)} MiB source limit.", 422)
                                 if staged_bytes + size > 256 * 1024 * 1024:
                                     raise LibraryError("Collection staging exceeds the 256 MiB batch limit.", 422)
                                 content = stream.read(MAX_SOURCE_UPLOAD + 1)
                             if len(content) > MAX_SOURCE_UPLOAD:
-                                raise LibraryError("Staged file exceeds the 32 MiB source limit.", 422)
+                                raise LibraryError(f"Staged file exceeds the {MAX_SOURCE_UPLOAD // (1024 * 1024)} MiB source limit.", 422)
                             if hashlib.sha256(content).hexdigest() != source.sha256:
                                 raise LibraryError("Staged file hash does not match the manifest.", 422)
                             staged_bytes += len(content)

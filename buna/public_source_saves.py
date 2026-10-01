@@ -17,6 +17,7 @@ from starlette.concurrency import run_in_threadpool
 
 from buna.hosted_runtime import read_artifact, job_storage_bytes
 from buna.shared_library import MAX_ORIGINAL_BYTES, MAX_PARSED_BYTES, SharedLibraryError
+from buna.upload_limits import upload_form
 
 logger = logging.getLogger(__name__)
 PENDING = {"receiving", "queued", "validating", "saving"}
@@ -239,7 +240,7 @@ def install_source_saves(app, *, shared, root, connect, session, lock, gate, act
         folder = parent / receipt
         folder.mkdir(mode=0o711)
         try:
-            async with request.form(max_files=1, max_fields=1, max_part_size=8192) as form:
+            async with upload_form(request, max_files=1, max_fields=1, max_part_size=8192) as form:
                 source = form.get("source")
                 if str(form.get("share_authorized", "")) != "true":
                     raise HTTPException(422, "Explicit shared hosted-use authorization is required.")
@@ -253,7 +254,7 @@ def install_source_saves(app, *, shared, root, connect, session, lock, gate, act
                     while chunk := await source.read(65536):
                         total += len(chunk)
                         if total > MAX_ORIGINAL_BYTES:
-                            raise HTTPException(413, "Comparison PDFs must be at most 8 MiB.")
+                            raise HTTPException(413, "Comparison PDFs must be at most 40 MiB.")
                         digest.update(chunk)
                         output.write(chunk)
                 with (folder / "original.pdf").open("rb") as original:
@@ -267,11 +268,13 @@ def install_source_saves(app, *, shared, root, connect, session, lock, gate, act
                                (digest.hexdigest(), Path(source.filename).name[:255], version, receipt))
             start(receipt)
             return public(owned(receipt, owner))
-        except Exception as exc:
+        except BaseException as exc:
             with lock, connect() as db:
                 db.execute("DELETE FROM source_saves WHERE id=?", (receipt,))
             shutil.rmtree(folder)
             if isinstance(exc, HTTPException):
+                raise
+            if not isinstance(exc, Exception):
                 raise
             logger.warning("Source save admission failed (%s).", type(exc).__name__)
             raise HTTPException(503, "Saving could not start. Nothing has been confirmed saved; retry.") from None

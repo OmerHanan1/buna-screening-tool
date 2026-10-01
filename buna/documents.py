@@ -6,11 +6,12 @@ import re
 from pathlib import Path
 
 from buna.exclusions import quotation_intervals
+from buna.upload_limits import MAX_FILE_BYTES
 
-MAX_BYTES = 20 * 1024 * 1024
+MAX_BYTES = MAX_FILE_BYTES
 MAX_PAGES = 250
 MAX_CHARACTERS = 1_000_000
-SOURCE_MAX_BYTES = 32 * 1024 * 1024
+SOURCE_MAX_BYTES = MAX_FILE_BYTES
 SOURCE_MAX_PAGES = 600
 SOURCE_MAX_CHARACTERS = 2_000_000
 PARSER_SECONDS = 35

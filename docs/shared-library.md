@@ -100,14 +100,17 @@ and daily limits; startup rejects settings above the approved 100/50 ceilings.
 The setup page shows remaining count, daily admissions and bytes; these are
 informational snapshots, with authoritative conditional checks at publication.
 Each additional original PDF remains limited
-to 8 MiB; each parsed cache to 32 MiB. A comparison may materialize at most
+to 40 MiB (41,943,040 bytes, inclusive); each parsed cache to 32 MiB. A comparison may materialize at most
 192 MiB of shared parsed caches. Existing manuscript, parser, comparison and
 worker time/memory limits still apply; a larger selected corpus can be partial.
 
 Choose or drop **up to 50 additional files**, appending subsequent selections.
-The private upload queue sends **one 8 MiB-maximum file per request**, with a
-**128 MiB per-workspace original-byte budget** (in-flight uploads reserve 8 MiB).
-This is not a 400 MiB multipart request: the 32 MiB request guard remains.
+The private upload queue sends **one 40 MiB-maximum file per request**, with a
+**128 MiB per-workspace original-byte budget** (in-flight uploads reserve 40 MiB).
+The request guard is **41 MiB**, allowing one 40 MiB file plus multipart framing,
+not a 50-file multipart request. Actual streamed bytes enforce both limits even
+without a trustworthy Content-Length. Multipart files spool after 1 MiB; parsing
+uses 64 KiB chunks and closes temporary files on rejection or disconnect.
 `POST /source-uploads` returns owner-bound, one-hour IDs. One comparison attaches
 all selected IDs; server-owned originals are copied into an immutable job
 snapshot and content hashes deduplicate sources, never filenames. Different
@@ -152,7 +155,10 @@ retries honor `Retry-After`, retry at most twice, and do not automatically retry
 daily limits. The service still admits ten comparisons/day, three/visitor.
 
 The 768 MiB runtime and 256 MiB worker-directory guards remain. Working originals
-are limited to 144 MiB including the manuscript and uncached curated sources.
+are limited to 168 MiB: the unchanged 128 MiB source budget plus a 40 MiB
+manuscript, including any uncached curated sources. Private originals remain
+separate copies from worker-owned files so worker writes cannot corrupt another
+snapshot. This does not increase the worker-directory or runtime storage guards.
 The worker keeps at most 32 MiB of newly parsed private caches, reparsing later
 sources when necessary rather than accumulating every parsed document. Existing
 legacy comparison-bound save caches retain their previous behavior. Shared

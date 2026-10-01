@@ -33,9 +33,10 @@ from buna.public_corpus import load_corpus
 from buna.team_auth import TeamConfig, TeamAuthenticator
 from buna.hosted_runtime import WALL_SECONDS, ERRORS, read_artifact, safe_progress, job_storage_bytes
 from buna.pdf_reports import PDF_RENDERER_VERSION
+from buna.upload_limits import MAX_FILE_BYTES, REQUEST_BYTES, upload_form
 
 RETENTION = 3600
-BODY_LIMIT = 32 * 1024 * 1024
+BODY_LIMIT = REQUEST_BYTES
 MAX_JOBS = 10
 MAX_DISK = 768 * 1024 * 1024
 logger = logging.getLogger(__name__)
@@ -58,7 +59,7 @@ class PublicBodyLimit:
         except ValueError:
             length = BODY_LIMIT + 1
         if length < 0 or length > BODY_LIMIT:
-            return await JSONResponse({"detail": "Upload exceeds the 32 MiB request limit."}, 413)(scope, receive, send)
+            return await JSONResponse({"detail": "Upload exceeds the 41 MiB request limit. Upload comparison files individually; each file is limited to 40 MiB."}, 413)(scope, receive, send)
         total = 0
         async def bounded():
             nonlocal total
@@ -544,7 +545,7 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
                 if uid >= 60000:
                     raise HTTPException(503, "Service identity capacity exhausted; maintenance required.")
             folder.mkdir(mode=0o700)
-            async with request.form(max_files=MAX_FILES + 1, max_fields=6, max_part_size=16384) as form:
+            async with upload_form(request, max_files=MAX_FILES + 1, max_fields=6, max_part_size=16384) as form:
                 selected = json.loads(str(form.get("selected", "[]")))
                 upload_ids = json.loads(str(form.get("uploaded_sources", "[]")))
                 keep_indices = json.loads(str(form.get("save_sources", "[]")))
@@ -577,13 +578,14 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
                         while chunk := await upload.read(65536):
                             total += len(chunk)
                             if total > maximum:
-                                raise HTTPException(413, "Public file size limit exceeded.")
+                                raise HTTPException(413, "File exceeds the 40 MiB limit.")
                             output.write(chunk)
                     if not total:
                         raise HTTPException(422, "Empty file.")
                     return file.name
-                target_name = await save(target, "target", 10 * 1024 * 1024)
-                target_digest = hashlib.sha256((folder / target_name).read_bytes()).hexdigest()
+                target_name = await save(target, "target", MAX_FILE_BYTES)
+                with (folder / target_name).open("rb") as stream:
+                    target_digest = hashlib.file_digest(stream, "sha256").hexdigest()
                 sources = []
                 selected_ids = {}
                 # No worker is active while admission owns the gate; immutable
@@ -616,17 +618,17 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
                         sources.append({"path": name, "title": paper["title"]})
                 manual = form.getlist("sources")
                 if not isinstance(upload_ids, list) or len(manual) + len(upload_ids) > MAX_FILES:
-                    raise HTTPException(422, "At most 50 personal comparison files. Use individual uploads for batches exceeding 32 MiB.")
+                    raise HTTPException(422, "At most 50 personal comparison files. Use individual uploads for batches exceeding the 41 MiB request limit.")
                 if any(i < 0 or i >= len(manual) for i in keep_indices):
                     raise HTTPException(422, "Only supplementary comparison files can be selected for sharing.")
                 saves = []
                 for i, upload in enumerate(manual):
                     if not hasattr(upload, "read"):
                         raise HTTPException(422, "Invalid source file.")
-                    name = await save(upload, f"source-{i}", 8 * 1024 * 1024)
+                    name = await save(upload, f"source-{i}", MAX_FILE_BYTES)
                     title = Path(upload.filename or "Source").name[:255]
-                    content = (folder / name).read_bytes()
-                    digest = hashlib.sha256(content).hexdigest()
+                    with (folder / name).open("rb") as stream:
+                        digest = hashlib.file_digest(stream, "sha256").hexdigest()
                     if i in keep_indices and Path(name).suffix != ".pdf":
                         raise HTTPException(422, "Only supplementary PDFs can be kept in the shared library.")
                     if digest not in selected_ids:
@@ -643,7 +645,7 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
                         else:
                             retained = save_root / job_id
                             retained.mkdir(mode=0o700, exist_ok=True)
-                            (retained / (digest + ".pdf")).write_bytes(content)
+                            shutil.copyfile(folder / name, retained / (digest + ".pdf"))
                         saves.append({"source_id": selected_ids[digest], "sha256": digest, "title": title,
                                       "state": state, "reason": reason,
                                       "library_version": approved[digest]["library_version"] if state == "already-present"
@@ -660,8 +662,8 @@ def create_public_app(corpus_root: Path | None = None, runtime_root: Path | None
                         sources.append(entry)
                     else:
                         (folder / entry["path"]).unlink()
-                if job_storage_bytes(folder) > 144 * 1024 * 1024:
-                    raise HTTPException(413, "Selected original files exceed the 144 MiB working-input budget. Deselect some uncached papers.")
+                if job_storage_bytes(folder) > MAX_BATCH_BYTES + MAX_FILE_BYTES:
+                    raise HTTPException(413, "Selected original files exceed the 168 MiB working-input budget (128 MiB sources plus 40 MiB manuscript). Deselect some uncached papers.")
                 if not sources:
                     raise HTTPException(422, "Select or upload at least one comparison paper.")
                 versions = {digest: approved[digest]["library_version"] for digest in selected}

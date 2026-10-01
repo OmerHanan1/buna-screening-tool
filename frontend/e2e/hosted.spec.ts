@@ -153,6 +153,58 @@ async function staticResponse(url: string) {
   };
 }
 
+test("40 MiB chooser and drop boundaries retain the 128 MiB batch budget", async ({ page }) => {
+  test.setTimeout(120_000);
+  let uploads = 0;
+  await page.route(site + "**", async route => route.fulfill(await staticResponse(route.request().url())));
+  await page.route(backend + "/**", async route => {
+    const url = new URL(route.request().url());
+    if (url.pathname.endsWith("/config")) return route.fulfill({ json: { mode: "email-gate" } });
+    if (url.pathname.endsWith("/session")) return route.fulfill({ json: { token: "synthetic-capacity-capability" } });
+    if (url.pathname.endsWith("/library")) return route.fulfill({ json: { papers } });
+    if (url.pathname.endsWith("/source-uploads")) {
+      uploads++;
+      return route.fulfill({ status: 201, json: { id: `capacity-${uploads}`, state: "ready", digest: String(uploads).repeat(64) } });
+    }
+    return route.fulfill({ status: 404 });
+  });
+  await page.goto(site);
+  await page.getByLabel("Email address").fill("synthetic@example.org");
+  await page.getByRole("button", { name: "Continue", exact: true }).click();
+  await expect(page.getByText(/up to 40 MiB/)).toBeVisible();
+  const buffer = Buffer.alloc(40 * 1024 * 1024);
+  buffer.write("%PDF-1.7\n");
+  await page.getByLabel("Your paper", { exact: true }).setInputFiles({ name: "exact-target.pdf", mimeType: "application/pdf", buffer });
+  await expect(page.getByText("Ready to upload", { exact: true })).toBeVisible();
+  await page.getByLabel("Your paper", { exact: true }).setInputFiles({ name: "over-target.pdf", mimeType: "application/pdf", buffer: Buffer.concat([buffer, Buffer.from("\n")]) });
+  await expect(page.getByRole("alert")).toContainText("40 MiB limit");
+  await page.getByLabel("Your paper", { exact: true }).setInputFiles({ name: "exact-target.pdf", mimeType: "application/pdf", buffer });
+  await page.getByLabel("Additional comparison papers").setInputFiles({ name: "exact-source.pdf", mimeType: "application/pdf", buffer });
+  await expect(page.getByRole("status", { name: "Upload status: exact-source.pdf", exact: true })).toContainText("Ready for comparison", { timeout: 30_000 });
+  async function drop(name: string, size: number, count = 1) {
+    const transfer = await page.evaluateHandle(({ name, size, count }) => {
+      const data = new DataTransfer();
+      for (let index = 0; index < count; index++) {
+        const bytes = new Uint8Array(size);
+        bytes.set(new TextEncoder().encode("%PDF-1.7\n"));
+        data.items.add(new File([bytes], `${index}-${name}`, { type: "application/pdf" }));
+      }
+      return data;
+    }, { name, size, count });
+    await page.getByRole("region", { name: "Comparison upload queue" }).dispatchEvent("drop", { dataTransfer: transfer });
+    await transfer.dispose();
+  }
+  await drop("over-source.pdf", buffer.length + 1);
+  await expect(page.getByRole("status", { name: "Upload status: 0-over-source.pdf", exact: true })).toContainText("40 MiB limit");
+  await page.getByRole("button", { name: "Remove comparison 0-over-source.pdf", exact: true }).click();
+  await drop("exact-drop.pdf", buffer.length);
+  await expect(page.getByRole("status", { name: "Upload status: 0-exact-drop.pdf", exact: true })).toContainText("Ready for comparison", { timeout: 30_000 });
+  await drop("over-batch.pdf", buffer.length, 2);
+  await expect(page.getByRole("alert")).toContainText("160.0 MiB");
+  await expect(page.getByRole("alert")).toContainText("128 MiB batch budget");
+  expect(uploads).toBe(2);
+});
+
 test("opt-in actual hosted PDF workflow", async ({ page }) => {
   test.skip(!process.env.HOSTED_TEST_EMAIL, "Requires explicit authorized live-test email.");
   test.setTimeout(1_020_000);

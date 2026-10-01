@@ -3,6 +3,7 @@ import hashlib
 import json
 from pathlib import Path
 from urllib.parse import urlsplit
+from buna.upload_limits import MAX_FILE_BYTES
 
 ALLOWED_LICENSES = {"CC0-1.0", "CC-BY-4.0", "CC-BY-3.0", "CC-BY-2.0", "CC-BY-SA-4.0"}
 
@@ -23,7 +24,7 @@ def load_corpus(root: Path) -> list[dict]:
                 or name not in {digest + ".pdf", digest + ".txt"} or digest in seen):
             raise ValueError("Invalid or duplicate public corpus identity.")
         path = root / name
-        if path.is_symlink() or not path.is_file() or path.stat().st_size > 32 * 1024 * 1024:
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > MAX_FILE_BYTES:
             raise ValueError("Invalid public corpus file.")
         total_bytes += path.stat().st_size
         if total_bytes > 128 * 1024 * 1024:

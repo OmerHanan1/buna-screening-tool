@@ -12,10 +12,11 @@ import time
 from pathlib import Path
 from typing import Protocol
 from uuid import uuid4
+from buna.upload_limits import MAX_FILE_BYTES
 
 MAX_PAPERS = int(os.environ.get("BUNA_SHARED_MAX_PAPERS", "100"))
 MAX_TOTAL_BYTES = 512 * 1024 * 1024
-MAX_ORIGINAL_BYTES = 8 * 1024 * 1024
+MAX_ORIGINAL_BYTES = MAX_FILE_BYTES
 MAX_PARSED_BYTES = 32 * 1024 * 1024
 MAX_CATALOG_BYTES = 512 * 1024
 MAX_NEW_PER_DAY = int(os.environ.get("BUNA_SHARED_MAX_NEW_PER_DAY", "50"))

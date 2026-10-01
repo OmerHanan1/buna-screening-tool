@@ -30,7 +30,8 @@ complete matched passages without adding the full source documents.
 
 Additional comparison PDFs can optionally be kept in the durable shared library.
 Choose or drop up to **50 comparison files**, with additional selections appended.
-The private queue uploads files individually (8 MiB each, 128 MiB total), then
+Manuscripts and comparison files accept up to **40 MiB per file** (41,943,040 bytes).
+The private queue uploads comparison files individually (128 MiB total), then
 one comparison includes all selected sources. Failed uploads require retry or
 explicit removal; identical content is compared once, not deduplicated by name.
 The **Keep in library for future comparisons** checkbox is off by default and

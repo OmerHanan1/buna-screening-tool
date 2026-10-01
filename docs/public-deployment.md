@@ -36,9 +36,22 @@ SQLite database or cross-revision UID/file namespace. Losing the session capabil
 means losing access. Download reports promptly.
 
 Admission limits: 10 comparisons per rolling day per replica, three per session,
-200 live sessions, one active worker, 32 MiB request envelope, 10 MiB/250,000-character
-manuscripts and at most 50 personal 8 MiB sources, privately staged one at a time
-within a 128 MiB batch budget (the multipart request cap remains 32 MiB).
+200 live sessions, one active worker, 41 MiB request envelope, 40 MiB/250-page/250,000-character
+manuscripts and at most 50 personal 40 MiB sources (600 pages/2 million characters),
+privately staged one at a time within the unchanged 128 MiB batch budget.
+The 40 MiB per-file bound is inclusive (41,943,040 bytes); one extra byte is rejected.
+Local manuscripts retain their 250-page/1-million-character extraction profile.
+The 1 MiB request headroom is for multipart framing, not a larger per-file limit.
+Byte counts are enforced while streaming, including missing/forged Content-Length;
+multipart files spool to disk after 1 MiB and are closed on cancellation or rejection.
+The browser calls Container Apps directly, not the Static Web Apps API proxy.
+No ingress, replica, CPU, memory, shared-storage quota or runtime deadline is increased.
+`python -m deploy.verify_upload_capacity` generates original eight-page, image-bearing
+36/40 MiB PDFs and checks manuscript/source extraction plus the 40 MiB + 1 rejection.
+`--output-dir <new-directory>` retains those synthetic fixtures for the release
+owner's native gateway, saved-source persistence and actual-ingress checks.
+This extraction-only command is not proof of native worker isolation or cloud
+persistence; those checks must pass separately before declaring a release live.
 Limits reset if a replica
 restarts. Rate/quotas and one replica reduce abuse but are **not a billing cap**.
 No external DOI, AI or discovery requests occur in the public worker.

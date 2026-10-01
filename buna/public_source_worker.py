@@ -15,7 +15,8 @@ def validate_source(folder: Path):
     from buna.documents import extract_document, ExtractionError
     from buna.shared_library import cache_document, SharedLibraryError
     source = folder / "source.pdf"
-    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    with source.open("rb") as stream:
+        digest = hashlib.file_digest(stream, "sha256").hexdigest()
     canonical = folder / ("shared-validate-" + digest + ".pdf")
     source.rename(canonical)
     try:

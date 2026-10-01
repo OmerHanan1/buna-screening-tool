@@ -125,7 +125,7 @@ def test_cancel_during_validation_cannot_turn_into_saved(tmp_path, monkeypatch):
         assert not json.loads(blobs.values["catalog-v1.json"][0])["papers"]
 
 
-@pytest.mark.parametrize("data,authorization,status", [(b"not a pdf", "true", 422), (SOURCE, "", 422), (b"%PDF-" + b"x" * (8 * 1024 * 1024), "true", 413)])
+@pytest.mark.parametrize("data,authorization,status", [(b"not a pdf", "true", 422), (SOURCE, "", 422), (b"%PDF-" + b"x" * (40 * 1024 * 1024), "true", 413)])
 def test_invalid_or_unapproved_never_saved(tmp_path, monkeypatch, data, authorization, status):
     blobs = MemoryBlobs()
     with TestClient(app_for(tmp_path, monkeypatch, blobs)) as client:

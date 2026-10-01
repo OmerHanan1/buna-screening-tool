@@ -19,10 +19,10 @@ from buna.storage import Store, now
 from buna.result_state import result_state
 from buna.local_alignment import DEFAULT_POLICY
 from buna.presentation import evidence_presentation, manuscript_reader
-from buna.documents import current_structure, SOURCE_MAX_BYTES, SOURCE_MAX_CHARACTERS, PARSER_SECONDS, PARSER_MEMORY_BYTES
+from buna.documents import current_structure, MAX_BYTES, SOURCE_MAX_BYTES, SOURCE_MAX_CHARACTERS, PARSER_SECONDS, PARSER_MEMORY_BYTES
 
 logger = logging.getLogger(__name__)
-MAX_UPLOAD = 20 * 1024 * 1024
+MAX_UPLOAD = MAX_BYTES
 MAX_SOURCE_UPLOAD = SOURCE_MAX_BYTES
 ACTIVE = {"queued", "running"}
 _SOURCE_PARSERS = threading.BoundedSemaphore(2)

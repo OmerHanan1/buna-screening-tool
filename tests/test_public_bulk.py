@@ -117,7 +117,7 @@ def test_upload_errors_release_reservations_and_size_limits(tmp_path, monkeypatc
     with TestClient(create_public_app(root, tmp_path, worker_runner=worker)) as client:
         headers = {"Authorization": "Bearer " + client.post("/api/public/session").json()["token"]}
         for body, name, status in [(b"", "a.txt", 422), (b"not pdf", "a.pdf", 422), (b"zip", "a.zip", 415),
-                                   (b"x" * (8 * 1024 * 1024 + 1), "a.txt", 413)]:
+                                   (b"x" * (40 * 1024 * 1024 + 1), "a.txt", 413)]:
             response = stage(client, headers, body, name)
             assert response.status_code == status, response.text
         assert client.delete("/api/public/source-uploads", headers=headers).json()["count"] == 0

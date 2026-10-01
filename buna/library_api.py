@@ -95,7 +95,7 @@ def library_router(library):
         try:
             content = file.file.read(MAX_SOURCE_UPLOAD + 1)
             if len(content) > MAX_SOURCE_UPLOAD:
-                raise HTTPException(413, "File exceeds the 32 MiB source limit.")
+                raise HTTPException(413, f"File exceeds the {MAX_SOURCE_UPLOAD // (1024 * 1024)} MiB source limit.")
             return visible(call(library.manual, content, file.filename or "paper", doi or None))
         finally:
             file.file.close()

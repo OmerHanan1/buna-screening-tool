@@ -8,9 +8,9 @@ from uuid import UUID, uuid4
 from fastapi import HTTPException, Request
 
 from buna.hosted_runtime import job_storage_bytes
+from buna.upload_limits import MAX_FILE_BYTES, upload_form
 
 MAX_FILES = 50
-MAX_FILE_BYTES = 8 * 1024 * 1024
 MAX_BATCH_BYTES = 128 * 1024 * 1024
 RETENTION = 3600
 
@@ -67,7 +67,7 @@ def install_source_uploads(app, *, root, connect, session, lock):
             db.execute("INSERT INTO source_uploads VALUES(?,?,?,?,?,?,?,'','receiving')",
                        (reference, owner, time.time(), key, "", "", MAX_FILE_BYTES))
         try:
-            async with request.form(max_files=1, max_fields=0, max_part_size=8192) as form:
+            async with upload_form(request, max_files=1, max_fields=0, max_part_size=8192) as form:
                 source = form.get("source")
                 if not hasattr(source, "read"):
                     raise HTTPException(422, "Upload one comparison file.")
@@ -75,7 +75,7 @@ def install_source_uploads(app, *, root, connect, session, lock):
                 if suffix not in {".pdf", ".txt"}:
                     raise HTTPException(415, "Only PDF or plain text is supported.")
                 if source.size is None or source.size > MAX_FILE_BYTES:
-                    raise HTTPException(413, "Comparison files must be at most 8 MiB.")
+                    raise HTTPException(413, "Comparison files must be at most 40 MiB.")
                 with lock, connect() as db:
                     used = db.execute("SELECT COALESCE(SUM(bytes),0) FROM source_uploads WHERE owner=? AND id<>?",
                                       (owner, reference)).fetchone()[0]
@@ -87,7 +87,7 @@ def install_source_uploads(app, *, root, connect, session, lock):
                     while chunk := await source.read(65536):
                         size += len(chunk)
                         if size > MAX_FILE_BYTES:
-                            raise HTTPException(413, "Comparison files must be at most 8 MiB.")
+                            raise HTTPException(413, "Comparison files must be at most 40 MiB.")
                         digest.update(chunk)
                         output.write(chunk)
                 if not size:

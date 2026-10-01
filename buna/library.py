@@ -262,7 +262,7 @@ class Library:
         if not content:
             raise ParseFailure("The file is empty.")
         if len(content) > MAX_SOURCE_UPLOAD:
-            raise ParseFailure("File exceeds the 32 MiB source limit.")
+            raise ParseFailure(f"File exceeds the {MAX_SOURCE_UPLOAD // (1024 * 1024)} MiB source limit.")
         if suffix not in {".pdf", ".txt"}:
             raise ParseFailure("Only PDF and UTF-8 text files are supported.")
         if suffix == ".pdf" and not content.startswith(b"%PDF-"):

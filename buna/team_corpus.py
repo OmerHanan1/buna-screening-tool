@@ -3,6 +3,7 @@ import hashlib
 import json
 from pathlib import Path
 from urllib.parse import urlsplit
+from buna.upload_limits import MAX_FILE_BYTES
 
 
 def load_team_corpus(root: Path, expected_manifest_sha: str, tenant: str, owner_oid: str):
@@ -29,7 +30,7 @@ def load_team_corpus(root: Path, expected_manifest_sha: str, tenant: str, owner_
             if not isinstance(permission.get(field), str) or not permission[field].strip():
                 raise ValueError("Private corpus permission evidence is incomplete.")
         path = root / filename
-        if path.is_symlink() or not path.is_file() or path.stat().st_size > 32 * 1024 * 1024:
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > MAX_FILE_BYTES:
             raise ValueError("Invalid private corpus file.")
         total += path.stat().st_size
         if total > 160 * 1024 * 1024:
@@ -73,7 +74,7 @@ def load_attested_corpus(root: Path, expected_manifest_sha: str):
         if paper.get("hosted_processing_basis") != "user-attested-hosted-use":
             raise ValueError("File is outside the hosted-use attestation.")
         path = root / filename
-        if path.is_symlink() or not path.is_file() or path.stat().st_size > 32 * 1024 * 1024:
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > MAX_FILE_BYTES:
             raise ValueError("Invalid hosted corpus file.")
         total += path.stat().st_size
         if total > 160 * 1024 * 1024:

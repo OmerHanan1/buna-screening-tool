@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { ArrowRight, FileText, LoaderCircle, Plus, X } from "lucide-react";
 import PdfActions from "./PdfActions";
-import { Elapsed, fileSize, ManuscriptInput, PaperDialog, validateFile, type HostedPaper } from "./PublicControls";
+import { Elapsed, fileSize, ManuscriptInput, PaperDialog, validateFile, MAX_FILE_MIB, MAX_BATCH_BYTES, type HostedPaper } from "./PublicControls";
 import "./public.css";
 
 type Job = { id: string; status: string; checked?: number; total?: number; overlap_percent?: number; score_available?: boolean; partial?: boolean; warnings?: string[]; error?: string; algorithm_version?: string; comparison_model?: string; score_basis?: string; score_policy_version?: string; eligibility_profile?: string; word_accounting?: { total_words: number; scoped_words: number; eligible_words: number; score_denominator_words: number; overlapping_words: number; front_matter_words: number; excluded_bibliography_words: number; excluded_quotation_words: number; other_excluded_manuscript_words: number; header_removed_words?: number }; classification_counts?: { exact_words: number; similar_only_words: number; unmatched_words: number; not_fully_checked_words: number }; error_code?: string; diagnostic_id?: string; evidence_available?: boolean; library_saves?: { source_id: string; title: string; state: string; reason: string }[]; progress?: { stage?: string; source_index?: number; source_count?: number; checked_sources?: number; elapsed_seconds?: number } };
@@ -327,7 +327,7 @@ export default function PublicApp() {
   async function chooseTarget(file: File) {
     if (busy) return;
     const choice = ++targetChoice.current;
-    const invalid = await validateFile(file, 10);
+    const invalid = await validateFile(file);
     if (choice !== targetChoice.current) return;
     setFileError(invalid);
     if (!invalid) setTarget(file);
@@ -336,13 +336,14 @@ export default function PublicApp() {
     if (busy) return;
     setSourceError("");
     if (sourcesRef.current.length + files.length > 50) { setSourceError("You can add up to 50 comparison files. Remove files or choose a smaller batch; nothing from this selection was added."); return; }
-    if ([...sourcesRef.current, ...files].reduce((sum, file) => sum + file.size, 0) > 128 * 1024 * 1024) {
-      setSourceError("Comparison uploads exceed the 128 MiB batch budget. Choose a smaller batch."); return;
+    const selectedBytes = [...sourcesRef.current, ...files].reduce((sum, file) => sum + file.size, 0);
+    if (selectedBytes > MAX_BATCH_BYTES) {
+      setSourceError(`Comparison uploads total ${(selectedBytes / (1024 * 1024)).toFixed(1)} MiB and exceed the 128 MiB batch budget. Choose a smaller batch.`); return;
     }
     sourcesRef.current = [...sourcesRef.current, ...files];
     setSources(sourcesRef.current);
     for (const file of files) {
-      const invalid = await validateFile(file, 8);
+      const invalid = await validateFile(file);
       if (!sourcesRef.current.includes(file)) continue;
       updateUpload(file, { key: crypto.randomUUID(), state: invalid ? "failed" : "waiting", reason: invalid });
     }
@@ -502,7 +503,7 @@ export default function PublicApp() {
             <section className="hosted-extras" aria-label="Comparison upload queue" onDragOver={e => e.preventDefault()} onDrop={e => { e.preventDefault(); void addSources(Array.from(e.dataTransfer.files)); }}>
               <input ref={extraInput} tabIndex={-1} className="hosted-hidden-input" type="file" multiple accept=".pdf,.txt" aria-label="Additional comparison papers" onChange={e => { void addSources(Array.from(e.target.files || [])); e.target.value = ""; }} />
               <button className="hosted-text-button" onClick={() => extraInput.current?.click()}><Plus size={15} />Add your own comparison papers</button>
-              <p className="hosted-shared-notice">Choose or drop up to 50 comparison papers; additional selections append. 8 MiB per file, 128 MiB per batch. Files upload privately one at a time; nothing is shared unless you explicitly keep it. {sources.length} selected, {sources.filter(file => uploads.get(file)?.state === "ready").length} uploaded.</p>
+              <p className="hosted-shared-notice">Choose or drop up to 50 comparison papers; additional selections append. {MAX_FILE_MIB} MiB per file, 128 MiB per batch. Files upload privately one at a time; nothing is shared unless you explicitly keep it. {sources.length} selected, {sources.filter(file => uploads.get(file)?.state === "ready").length} uploaded.</p>
               {sharedAvailable && sources.some(file => /\.pdf$/i.test(file.name)) && <button onClick={() => {
                 const pdfs = sources.filter(file => /\.pdf$/i.test(file.name));
                 setKeepSources(previous => new Set([...previous, ...pdfs]));
@@ -513,7 +514,7 @@ export default function PublicApp() {
                 <div role="status" aria-label={`Upload status: ${file.name}`} className="hosted-shared-notice">
                   {uploads.get(file)?.state === "ready" ? sources.slice(0, i).some(other => uploads.get(other)?.digest === uploads.get(file)?.digest) ? "Uploaded. Identical content already selected; compared once." : "Uploaded privately. Ready for comparison."
                     : uploads.get(file)?.state === "failed" ? <><strong>Upload failed.</strong> {uploads.get(file)?.reason} <button onClick={async () => {
-                      const invalid = await validateFile(file, 8);
+                      const invalid = await validateFile(file);
                       const value = uploadsRef.current.get(file)!;
                       updateUpload(file, { ...value, state: invalid ? "failed" : "waiting", reason: invalid });
                     }}>Retry upload</button></> : uploads.get(file)?.state === "uploading" ? "Uploading this file (rate-limit waits retry up to twice)…" : "Queued for private upload…"}
@@ -583,7 +584,7 @@ export default function PublicApp() {
             {save.state === "failed" && <button onClick={() => void beginSourceSave(file)}>Retry save</button>}
             {save.id && <small> Save reference: {save.id}</small>}</p>)}
         </section>}
-        <details className="hosted-info"><summary>Privacy, access and source credits</summary><p>Files are processed on Azure, not sent to external AI or discovery providers. This page’s random access token stays in memory. Refreshing or leaving loses access. Manuscripts, reports and unsaved comparison files expire within one hour and may disappear sooner after restart. Comparison PDFs explicitly kept in the shared library persist for future visitors; the manuscript is never saved by that option.</p><p>Email ownership is not verified; anyone knowing an allowed email can enter and use shared papers for comparisons. Separate visitor tokens protect each visitor’s jobs. Do not upload confidential or sensitive manuscripts.</p><p>Manuscripts: 10 MiB, 250 pages, 250,000 extracted characters. Up to 50 added papers, 8 MiB each, 128 MiB per batch, uploaded individually within the 32 MiB request limit. Pages and extractability are checked during comparison. Resource limits can produce partial results, with every selected source accounted for.</p><button onClick={() => setReviewing(true)}>Review source credits</button><button onClick={credits}>Download source credits</button></details>
+        <details className="hosted-info"><summary>Privacy, access and source credits</summary><p>Files are processed on Azure, not sent to external AI or discovery providers. This page’s random access token stays in memory. Refreshing or leaving loses access. Manuscripts, reports and unsaved comparison files expire within one hour and may disappear sooner after restart. Comparison PDFs explicitly kept in the shared library persist for future visitors; the manuscript is never saved by that option.</p><p>Email ownership is not verified; anyone knowing an allowed email can enter and use shared papers for comparisons. Separate visitor tokens protect each visitor’s jobs. Do not upload confidential or sensitive manuscripts.</p><p>Manuscripts: {MAX_FILE_MIB} MiB, 250 pages, 250,000 extracted characters. Up to 50 added papers, {MAX_FILE_MIB} MiB each, 600 pages and 2 million extracted characters, 128 MiB per batch, uploaded individually within the 41 MiB request limit. Pages and extractability are checked during comparison. Resource limits can produce partial results, with every selected source accounted for.</p><button onClick={() => setReviewing(true)}>Review source credits</button><button onClick={credits}>Download source credits</button></details>
         <p className="hosted-info">Temporary workspace · Download your report before leaving.</p>
         {removalAvailable && <details className="hosted-info"><summary>Removing library papers</summary><p>Deselecting affects only this comparison. Remove from library requires confirmation and affects every app user. Existing reports and admitted comparisons are unchanged. Bundled files remain packaged privately; removed uploaded files enter delayed private cleanup.</p></details>}
       </>}

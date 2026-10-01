@@ -87,7 +87,7 @@ def test_public_origin_quota_and_allowlist(tmp_path, monkeypatch):
             result = c.post("/api/public/jobs", headers=owner, data={"selected": json.dumps(selected)},
                             files={"target": ("target.txt", b"synthetic")})
             assert result.status_code == 422
-        assert c.post("/api/public/jobs", headers={**owner, "Content-Length": str(33 * 1024 * 1024)}).status_code == 413
+        assert c.post("/api/public/jobs", headers={**owner, "Content-Length": str(41 * 1024 * 1024 + 1)}).status_code == 413
         import buna.public_app as module
         monkeypatch.setattr(module, "MAX_JOBS", 0)
         result = c.post("/api/public/jobs", headers=owner, files={"target": ("target.txt", b"synthetic")})
