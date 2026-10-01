@@ -13,9 +13,10 @@ from buna.citation_tokens import APA_VERSION, improved_citation_mask as citation
 from buna.span_evaluation import ledger_sha256
 from buna.match_diagnostics import alignment_details, raw_citation_pairs
 from buna.improved_layout import LAYOUT_VERSION, running_headers
+from buna.improved_tokens import OPERATORS, WORD_POLICY_VERSION, tokens
 
 from buna.classified import (
-    _attribution, _exact_runs, _regions, _side, tokens,
+    _attribution, _exact_runs, _regions, _side,
 )
 from buna.comparison import (
     ComparisonCancelled, MAX_DOCUMENT_CHARACTERS, MAX_EVIDENCE_BYTES,
@@ -29,7 +30,7 @@ from buna.score_policy import (
 
 MODEL_ID = "improvedEng"
 VERSION = "improvedEng-v3.1-precision"
-NORMALIZATION_VERSION = "nfkc-casefold-literal-numeric-document-local-hyphens-layout-v2"
+NORMALIZATION_VERSION = "nfkc-casefold-literal-numeric-document-local-hyphens-layout-operators-v3"
 WORKING_INDEX_BYTES = 128 * 1024 * 1024
 Pair = tuple[int, int]
 Path = tuple[Pair, ...]
@@ -43,9 +44,9 @@ _STOPWORDS = frozenset((
 ).split())
 _STATISTICS = frozenset("b d f m n p r t z df sd se sem ci es η β χ μ σ ρ".split())
 _NUMBER = re.compile(r"\d+(?:[.,]\d+)*")
-ELIGIBILITY_PROFILE = "improvedEng-layout-longquotes-v1"
+ELIGIBILITY_PROFILE = "improvedEng-layout-longquotes-operators-v2"
 DENOMINATOR_DESCRIPTION = (
-    "Unique original manuscript word positions excluding confirmed running headers, front matter before the recognized "
+    "Unique original manuscript word units including literal =, <, > and approx-equal operators, excluding confirmed running headers, front matter before the recognized "
     "Abstract, bibliography, and balanced quotations longer than three words when enabled. Overlapping exclusions count "
     "once. Short quotations, citations and unmatched eligible words remain in the denominator. Source exclusions never "
     "remove manuscript denominator words. This is an application policy, not verified vendor arithmetic."
@@ -694,6 +695,7 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
                        exact_percent=pct(n_exact), similar_only_percent=pct(n_similar), overlap_percent=pct(n_exact + n_similar))
     metrics = {
         **accounting, "eligibility_profile": ELIGIBILITY_PROFILE,
+        "operator_words": sum(token[0] in OPERATORS for token in mt),
         "header_removed_words": sum(headers), "citation_recognized_words": sum(m_cited),
         "overlapping_words": len(covered), "overlap_percent": pct(len(covered)),
         "exact_words": len(all_exact), "similar_only_words": len(all_similar),
@@ -720,6 +722,8 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
     settings = {"minimum_matched_words": 9, "exclude_bibliography": True, "exclude_quotes": exclude_quotes,
                 "score_basis": SCORE_BASIS, "score_policy_version": SCORE_POLICY_VERSION,
                 "eligibility_profile": ELIGIBILITY_PROFILE,
+                "word_policy_version": WORD_POLICY_VERSION,
+                "operator_policy": "Each literal =, <, > and \u2248 is one word unit for alignment/count/density/score; not meaningful content. Compound ASCII operators are separate literal units; no additional mathematical equivalences.",
                 "manuscript_scope": scope, "improved_eng_config": asdict(cfg),
                 "citation_qualification": {
                     "recognizer_version": APA_VERSION,

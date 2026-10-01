@@ -94,6 +94,8 @@ def _reference_probe(report, reference, documents, eligible):
     if documents is None:
         return {"status": "unavailable", "reason": "Actual source document required; no alignment was invented."}
     from buna.classified import tokens
+    if report["settings"].get("word_policy_version") == "literal-operators-equals-less-greater-approx-v1":
+        from buna.improved_tokens import tokens
     from buna.citation_tokens import citation_mask
     from buna.comparison import _line_join_words, _intervals, _mask
     from buna.match_diagnostics import alignment_details
@@ -118,7 +120,9 @@ def _reference_probe(report, reference, documents, eligible):
     excluded_source = _mask(st, _intervals(source))
     hard_target, hard_source = set(range(len(mt))) - eligible, excluded_source
     m_map, s_map = list(range(len(mt))), list(range(len(st)))
-    if report["settings"].get("eligibility_profile") == "improvedEng-layout-longquotes-v1":
+    if report["settings"].get("eligibility_profile") in {
+        "improvedEng-layout-longquotes-v1", "improvedEng-layout-longquotes-operators-v2",
+    }:
         from buna.citation_tokens import improved_citation_mask
         from buna.improved_layout import running_headers
         from buna.improved_eng import _long_quotes
