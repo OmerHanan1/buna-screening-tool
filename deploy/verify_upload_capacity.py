@@ -15,7 +15,7 @@ import time
 import pymupdf
 
 
-def image_pdf(path: Path, size: int):
+def image_pdf(path: Path, size: int, *, variant: str = ""):
     """An original RGB sensor image plus eight pages of extractable study text."""
     width = 4096
     height = (size - 16_384) // (width * 3)
@@ -25,6 +25,8 @@ def image_pdf(path: Path, size: int):
             page.insert_text((45, 45), f"Introduction - synthetic sensor study page {number}")
             page.insert_text((45, 65), "Amber sensors record stable laboratory measurements during controlled cycles.")
             page.insert_text((45, 85), "Discussion - original experimental observations support the reported results.")
+            if variant:
+                page.insert_text((45, 105), variant, fontsize=9)
             if number == 1:
                 image = pymupdf.Pixmap(pymupdf.csRGB, width, height, os.urandom(width * height * 3), False)
                 page.insert_image(pymupdf.Rect(45, 120, 550, 650), pixmap=image)

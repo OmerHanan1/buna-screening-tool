@@ -48,6 +48,7 @@ export default function PublicApp() {
   const [sourceError, setSourceError] = useState("");
   const [reviewing, setReviewing] = useState(false);
   const [focusedPaperId, setFocusedPaperId] = useState<string>();
+  const libraryTrigger = useRef<HTMLElement | null>(null);
   const [pdfBusy, setPdfBusy] = useState(false);
   const [startedAt, setStartedAt] = useState(0);
   const [submitted, setSubmitted] = useState({ title: "", count: 0 });
@@ -418,6 +419,7 @@ export default function PublicApp() {
     if (!refreshed) throw new Error("Removal was committed, but the library refresh failed. Retry to confirm its current contents.");
   }
   async function reviewLibrary(digest?: string) {
+    libraryTrigger.current = document.activeElement as HTMLElement | null;
     const refreshed = await loadLibrary(true);
     if (!refreshed) return;
     if (digest && !refreshed.some(paper => paper.sha256 === digest)) {
@@ -584,13 +586,13 @@ export default function PublicApp() {
             {save.state === "failed" && <button onClick={() => void beginSourceSave(file)}>Retry save</button>}
             {save.id && <small> Save reference: {save.id}</small>}</p>)}
         </section>}
-        <details className="hosted-info"><summary>Privacy, access and source credits</summary><p>Files are processed on Azure, not sent to external AI or discovery providers. This page’s random access token stays in memory. Refreshing or leaving loses access. Manuscripts, reports and unsaved comparison files expire within one hour and may disappear sooner after restart. Comparison PDFs explicitly kept in the shared library persist for future visitors; the manuscript is never saved by that option.</p><p>Email ownership is not verified; anyone knowing an allowed email can enter and use shared papers for comparisons. Separate visitor tokens protect each visitor’s jobs. Do not upload confidential or sensitive manuscripts.</p><p>Manuscripts: {MAX_FILE_MIB} MiB, 250 pages, 250,000 extracted characters. Up to 50 added papers, {MAX_FILE_MIB} MiB each, 600 pages and 2 million extracted characters, 128 MiB per batch, uploaded individually within the 41 MiB request limit. Pages and extractability are checked during comparison. Resource limits can produce partial results, with every selected source accounted for.</p><button onClick={() => setReviewing(true)}>Review source credits</button><button onClick={credits}>Download source credits</button></details>
+        <details className="hosted-info"><summary>Privacy, access and source credits</summary><p>Files are processed on Azure, not sent to external AI or discovery providers. This page’s random access token stays in memory. Refreshing or leaving loses access. Manuscripts, reports and unsaved comparison files expire within one hour and may disappear sooner after restart. Comparison PDFs explicitly kept in the shared library persist for future visitors; the manuscript is never saved by that option.</p><p>Email ownership is not verified; anyone knowing an allowed email can enter and use shared papers for comparisons. Separate visitor tokens protect each visitor’s jobs. Do not upload confidential or sensitive manuscripts.</p><p>Manuscripts: {MAX_FILE_MIB} MiB, 250 pages, 250,000 extracted characters. Up to 50 added papers, {MAX_FILE_MIB} MiB each, 600 pages and 2 million extracted characters, 128 MiB per batch, uploaded individually within the 41 MiB request limit. Pages and extractability are checked during comparison. Resource limits can produce partial results, with every selected source accounted for.</p>        <button onClick={event => { libraryTrigger.current = event.currentTarget; setFocusedPaperId(undefined); setReviewing(true); }}>Review source credits</button><button onClick={credits}>Download source credits</button></details>
         <p className="hosted-info">Temporary workspace · Download your report before leaving.</p>
         {removalAvailable && <details className="hosted-info"><summary>Removing library papers</summary><p>Deselecting affects only this comparison. Remove from library requires confirmation and affects every app user. Existing reports and admitted comparisons are unchanged. Bundled files remain packaged privately; removed uploaded files enter delayed private cleanup.</p></details>}
       </>}
     </main>
     <footer className="hosted-footer"><span>For research review.</span><a href="https://github.com/OmerHanan1/buna-screening-tool" target="_blank" rel="noreferrer">Source code · AGPL</a></footer>
     {reviewing && <PaperDialog papers={papers} selected={selected} onSelect={setSelected} onClose={() => setReviewing(false)} readOnly={busy || job !== null}
-      focusPaperId={focusedPaperId} onRemove={removalAvailable ? removeLibraryPaper : undefined} />}
+      focusPaperId={focusedPaperId} returnFocusTo={libraryTrigger.current} onRemove={removalAvailable ? removeLibraryPaper : undefined} />}
   </div>;
 }

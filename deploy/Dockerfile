@@ -20,6 +20,7 @@ COPY deploy/verify_eligible_policy.py /app/deploy/
 COPY deploy/verify_improved_eng.py /app/deploy/
 COPY deploy/verify_evidence_budget.py /app/deploy/
 COPY deploy/verify_upload_capacity.py /app/deploy/
+COPY deploy/verify_capacity_cloud.py /app/deploy/
 COPY release-context/wheels /wheels
 RUN pip install --no-index --find-links=/wheels setuptools wheel \
     && pip install --no-index --find-links=/wheels --no-build-isolation . \

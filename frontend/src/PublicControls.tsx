@@ -43,10 +43,11 @@ export function ManuscriptInput({ file, error, onFile, onRemove }: {
   </div>;
 }
 
-export function PaperDialog({ papers, selected, onSelect, onClose, readOnly = false, onRemove, focusPaperId }: {
+export function PaperDialog({ papers, selected, onSelect, onClose, readOnly = false, onRemove, focusPaperId, returnFocusTo }: {
   papers: HostedPaper[]; selected: string[]; onSelect: (ids: string[]) => void; onClose: () => void; readOnly?: boolean;
   onRemove?: (paper: HostedPaper) => Promise<void>;
   focusPaperId?: string;
+  returnFocusTo?: HTMLElement | null;
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const focusedPaper = useRef<HTMLDivElement>(null);
@@ -55,7 +56,7 @@ export function PaperDialog({ papers, selected, onSelect, onClose, readOnly = fa
   const [removing, setRemoving] = useState<HostedPaper | null>(null);
   const filtered = papers.filter(p => (p.title + " " + p.version).toLocaleLowerCase().includes(query.toLocaleLowerCase()));
   useEffect(() => {
-    const previous = document.activeElement as HTMLElement | null;
+    const previous = returnFocusTo || document.activeElement as HTMLElement | null;
     dialog.current?.showModal();
     if (focusPaperId) {
       focusedPaper.current?.scrollIntoView({ block: "center" });

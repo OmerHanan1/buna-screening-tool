@@ -20,6 +20,8 @@
 !deploy/verify_eligible_policy.py
 !deploy/verify_improved_eng.py
 !deploy/verify_evidence_budget.py
+!deploy/verify_upload_capacity.py
+!deploy/verify_capacity_cloud.py
 !release-context
 !release-context/wheels
 !release-context/wheels/*.whl
