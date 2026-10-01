@@ -1,11 +1,13 @@
 """Original synthetic policy fixtures, not a private-paper calibration corpus."""
 import pytest
+import itertools
 
 from buna.citation_tokens import improved_citation_mask
 from buna.classified import tokens
 from buna.documents import _structure
 from buna.improved_eng import improved_report
 from buna.improved_eng import _content, accepts_similar, content_details
+from buna.improved_eng import _Evidence, _collect, _path_bytes
 from buna.improved_layout import running_headers
 
 
@@ -179,3 +181,58 @@ def test_citations_cannot_create_an_artificial_four_word_anchor():
     info = content_details(path, words, mask, mask)
     assert info["longest_exact_run"] == 7
     assert info["distinct_matched_content_words"] == 9
+
+
+def test_thirty_eight_duplicates_charge_one_retained_path():
+    path = tuple((i, i) for i in range(12))
+    budget, paths = _Evidence(), []
+    for _ in range(38):
+        _collect(paths, path, budget, lambda: None)
+    assert paths == [path]
+    assert budget.bytes == budget.peak_bytes == _path_bytes(path)
+
+
+def test_transitive_overlap_union_is_order_independent_and_never_fills_gaps():
+    full = tuple((i, i + i // 5) for i in range(23))
+    candidates = [full[:12], full[6:18], full[11:]]
+    for order in itertools.permutations(candidates):
+        paths, budget = [], _Evidence()
+        for path in order:
+            _collect(paths, path, budget, lambda: None)
+        assert paths == [full]
+        assert budget.bytes == _path_bytes(full)
+
+
+def test_incompatible_alternative_and_independent_occurrence_are_preserved():
+    first = tuple((i, i + int(i >= 5)) for i in range(12))
+    conflicting = first[:5] + ((5, 5),) + first[6:]
+    independent = tuple((a, b + 100) for a, b in first)
+    paths, budget = [], _Evidence()
+    for path in (first, conflicting, independent):
+        _collect(paths, path, budget, lambda: None)
+    assert set(paths) == {first, conflicting, independent}
+    assert budget.bytes == sum(_path_bytes(p) for p in paths)
+
+
+def test_same_envelope_alternatives_materialize_once_without_losing_pairs(monkeypatch):
+    from buna import improved_eng as engine
+    words = "alpha beta gamma delta epsilon epsilon zeta eta theta iota kappa lambda"
+    source = words.replace("epsilon epsilon", "epsilon spacer epsilon")
+    first = tuple((i, i) for i in range(5)) + tuple((i, i + 1) for i in range(6, 12))
+    second = tuple((i, i) for i in range(4)) + ((5, 4),) + first[5:]
+    # The two actual paths use different equal epsilon target positions.
+    def alternatives(*args, **kwargs):
+        yield first
+        yield second
+        yield first
+    monkeypatch.setattr(engine, "search", alternatives)
+    result = compare(doc(words), doc(source + " ending"))
+    similar = [match for match in result["matches"] if match["match_kind"] == "similar"]
+    assert len(similar) == 1
+    match = similar[0]
+    assert match["alternative_alignments"]
+    actual = set(map(tuple, match["aligned_pairs"]))
+    for alternative in match["alternative_alignments"]:
+        actual.update(map(tuple, alternative))
+    assert actual == set(first) | set(second)
+    assert match["scored_word_positions"] == sorted({a for a, _ in actual})

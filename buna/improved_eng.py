@@ -286,21 +286,45 @@ def _path_bytes(path: Path) -> int:
     return 512 + len(path) * 192
 
 
-def _collect(paths: list[Path], candidate: Path, budget: _Evidence, check: Callable[[], None]) -> None:
+def _is_exact(path: Path) -> bool:
+    return len(path) == path[-1][0] - path[0][0] + 1 == path[-1][1] - path[0][1] + 1
+
+
+def _envelope(path: Path):
+    return path[0], path[-1], _is_exact(path)
+
+
+def _collect(paths: list[Path], candidate: Path, budget: _Evidence, check: Callable[[], None],
+             accept: Callable[[Path], bool] = valid) -> None:
     """Keep maximal pair-compatible evidence, never union unrelated envelopes."""
     check()
     for old in paths:
         check()
-        if _contains(old, candidate):
+        if _contains(old, candidate) and (not _is_exact(candidate) or _is_exact(old)):
             return
+    # A shared pair ties evidence to the same occurrence. Never fill an envelope
+    # with invented pairs or join two independent repetitions of the wording.
+    consumed = set()
+    changed = True
+    while changed:
+        changed = False
+        for index, old in enumerate(paths):
+            check()
+            if index in consumed or _is_exact(old) != _is_exact(candidate):
+                continue
+            if not (set(old) & set(candidate)):
+                continue
+            union = tuple(sorted(set(old) | set(candidate)))
+            if (all(a[0] < b[0] and a[1] < b[1] for a, b in zip(union, union[1:]))
+                    and (_is_exact(union) or accept(union))):
+                candidate = union
+                consumed.add(index)
+                changed = True
     # Reserve before modifying retained evidence so interrupted work stays valid.
     budget.add(_path_bytes(candidate))
-    def exact(path):
-        return len(path) == path[-1][0] - path[0][0] + 1 == path[-1][1] - path[0][1] + 1
-
     kept = []
     for old in paths:
-        if not _contains(candidate, old) or (exact(old) and not exact(candidate)):
+        if not _contains(candidate, old) or (_is_exact(old) and not _is_exact(candidate)):
             kept.append(old)
         else:
             budget.release(_path_bytes(old))
@@ -463,7 +487,8 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
                                m_skipped=m_skipped, s_skipped=s_skipped,
                                working_bytes=WORKING_INDEX_BYTES):
                 if accepts_similar(path, mw, m_cited, s_cited):
-                    _collect(scored_paths, path, evidence_budget, budget)
+                    _collect(scored_paths, path, evidence_budget, budget,
+                             lambda p: accepts_similar(p, mw, m_cited, s_cited))
             row["scored_search_complete"] = True
             phase = "audit"
             # Audit work must not consume the rest of the budget for later sources.
@@ -476,7 +501,8 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
                     ma, mb, sa, sb = path[0][0], path[-1][0] + 1, path[0][1], path[-1][1] + 1
                     if (any(not m_ok[a] or not s_exact[b] for a, b in path)
                             and accepts_similar(path, mw, m_cited, s_cited)):
-                        _collect(audit_paths, path, audit_budget, budget)
+                        _collect(audit_paths, path, audit_budget, budget,
+                                 lambda p: accepts_similar(p, mw, m_cited, s_cited))
                 try:
                     for a, e, b, f in _exact_runs(mw, [True] * len(mw), [0] * len(mw), sw, [True] * len(sw),
                                                 [0] * len(sw), 9, budget):
@@ -499,18 +525,26 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
 
         for excluded, paths in ((False, scored_paths), (True, audit_paths)):
             retained_budget = audit_budget if excluded else evidence_budget
-            paths.sort(reverse=True)
+            paths.sort(key=lambda p: (_envelope(p), p), reverse=True)
             while paths:
                 path = paths.pop()
                 check()
+                alternatives = [path]
+                while paths and _envelope(paths[-1]) == _envelope(path):
+                    alternatives.append(paths.pop())
+                # One span record, with compact pair provenance for incompatible
+                # alternatives. Every alternative passed acceptance independently.
+                alternatives.sort(key=lambda p: (-len(p), p))
+                path = alternatives[0]
                 original_path = tuple((m_map[a], s_map[b]) for a, b in path)
-                m_positions, s_positions = [p[0] for p in original_path], [p[1] for p in original_path]
+                m_positions = sorted({m_map[a] for p in alternatives for a, _ in p})
+                s_positions = sorted({s_map[b] for p in alternatives for _, b in p})
                 ma, mb, sa, sb = m_positions[0], m_positions[-1] + 1, s_positions[0], s_positions[-1] + 1
                 info = measures(path)
                 kind = "exact" if info["matched_words"] == info["manuscript_span"] == info["source_span"] else "similar"
                 # Reserve strings and offset arrays before materializing the report.
                 try:
-                    retained_budget.add(10240 + 768 * len(path) + 8 * (
+                    retained_budget.add(10240 + 768 * sum(map(len, alternatives)) + 8 * (
                         mt[mb - 1][2] - mt[ma][1] + st[sb - 1][2] - st[sa][1]))
                 except SearchLimit as exc:
                     row["audit_limit_reason" if excluded else "scored_limit_reason"] = exc.reason
@@ -523,7 +557,8 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
                     row.update(reason=exc.reason, incomplete_stage="evidence")
                     if exc.kind not in row["limits_reached"]:
                         row["limits_reached"].append(exc.kind)
-                    retained_budget.release(_path_bytes(path))
+                    for disposed in alternatives:
+                        retained_budget.release(_path_bytes(disposed))
                     for pending_path in paths:
                         retained_budget.release(_path_bytes(pending_path))
                     paths.clear()
@@ -550,9 +585,11 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
                     "source": {**s_side, "match_start": s_side["start"], "match_end": s_side["end"],
                                "highlights": [[a - s_side["start"], b - s_side["start"]] for a, b in s_side["equal_spans"]]},
                     "aligned_pairs": [list(p) for p in original_path], **info,
+                    "alternative_alignments": [
+                        [[m_map[a], s_map[b]] for a, b in alternative] for alternative in alternatives[1:]],
                     "similarity": min(info["manuscript_similarity"], info["source_similarity"]),
                     "scored_word_positions": [] if excluded else m_positions,
-                    "included_words": 0 if excluded else len(path), "excluded_words": len(path) if excluded else 0,
+                    "included_words": 0 if excluded else len(m_positions), "excluded_words": len(m_positions) if excluded else 0,
                     "excluded_from_score": excluded, "exclusion_reasons": reasons, **attribution,
                     "edits": {"manuscript_unmatched": info["manuscript_span"] - len(path),
                               "source_unmatched": info["source_span"] - len(path)},
@@ -580,12 +617,14 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
                 match["diagnostics"] = {
                     **details,
                     "matched_word_count": len(path), "raw_matched_word_count": len(raw_pairs),
+                    "alignment_alternative_count": len(alternatives), "unique_target_matched_words": len(m_positions),
                     "source": sid, "source_content_sha256": row["source_content_sha256"],
                     "match_kind": kind, "exact_citation_policy": "unchanged; citation qualification correction applies to Similar",
                     "scored": not excluded,
                 }
                 (raw if excluded else matches).append(match)
-                retained_budget.release(_path_bytes(path))
+                for disposed in alternatives:
+                    retained_budget.release(_path_bytes(disposed))
                 if not excluded:
                     (exact_words if kind == "exact" else similar_words)[sid].update(m_positions)
                     row[kind + "_matches"] += 1
@@ -638,6 +677,9 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
             r["status"] in {"compared", "compared-with-limits"} for r in coverage),
         "identical_sources_excluded": sum(r["status"] == "excluded-identical" for r in coverage),
         "all_sources_fully_checked": complete, "truncated": not complete,
+        "match_records": len(matches),
+        "distinct_target_match_spans": len({(m["manuscript"]["word_start"], m["manuscript"]["word_end"]) for m in matches}),
+        "alignment_alternatives": sum(1 + len(m["alternative_alignments"]) for m in matches),
     }
     warnings += [
         "improvedEng is experimental ordered lexical matching, not semantic matching or a verified Crossref model.",
