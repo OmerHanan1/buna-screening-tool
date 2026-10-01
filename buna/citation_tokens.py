@@ -22,3 +22,41 @@ def citation_mask(text, tokens):
         else:
             merged.append((start, end))
     return _mask(tokens, merged)
+
+
+# Opt-in: old engines and saved-report evaluation keep their historical grammar.
+APA_VERSION = "apa-author-year-original-offsets-v2"
+_INITIALS = r"(?:[A-Z]\.\s*){1,3}"
+_AUTHOR = rf"(?:{_INITIALS})?{_NAME}(?:,\s*{_INITIALS})?"
+_AUTHORS = rf"{_AUTHOR}(?:(?:\s*,\s*(?:(?:and|&)\s+)?|\s+(?:and|&)\s+){_AUTHOR}){{0,9}}(?:\s+et\s+al\.?)?"
+_YEARS = r"(?:18|19|20)\d{2}[a-z]?(?:\s*,\s*(?:(?:18|19|20)\d{2})?[a-z]){0,9}"
+_APA_NARRATIVE = re.compile(rf"(?<!\w){_AUTHORS}\s*\({_YEARS}(?:\s*;\s*{_YEARS}){{0,9}}\)")
+_APA_INLINE = re.compile(rf"(?<!\w){_AUTHORS}\s*,\s*{_YEARS}\b")
+_APA_ITEM = re.compile(rf"\s*(?:(?:see|also|e\.g\.,?|cf\.)\s+)*{_AUTHORS}\s*,?\s+{_YEARS}\s*")
+_APA_PARENS = re.compile(r"\([^()]{1,1000}\)")
+_NUMERIC_CITATION = re.compile(r"\[\s*\d+(?:\s*[,;–-]\s*\d+)*\s*\]")
+_NON_AUTHOR = frozenset(("study studies experiment experiments table figure anova ancova manova "
+                         "year years sample samples participants results model test tests").split())
+
+
+def improved_citation_mask(text, tokens):
+    """Recognize complete APA author evidence, never a year/et-al fragment alone."""
+    intervals = [m.span() for m in _NUMERIC_CITATION.finditer(text)]
+    for grammar in (_APA_NARRATIVE, _APA_INLINE):
+        for match in grammar.finditer(text):
+            first = re.match(r"\w+", match.group()).group().casefold()
+            if first not in _NON_AUTHOR:
+                intervals.append(match.span())
+    for match in _APA_PARENS.finditer(text):
+        items = match.group()[1:-1].split(";")
+        if all(_APA_ITEM.fullmatch(item) for item in items):
+            first_words = [re.search(r"\w+", item).group().casefold() for item in items]
+            if not any(word in _NON_AUTHOR for word in first_words):
+                intervals.append(match.span())
+    merged = []
+    for start, end in sorted(intervals):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = merged[-1][0], max(end, merged[-1][1])
+        else:
+            merged.append((start, end))
+    return _mask(tokens, merged)

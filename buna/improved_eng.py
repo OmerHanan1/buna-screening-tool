@@ -7,7 +7,7 @@ import time
 from collections import defaultdict
 from dataclasses import asdict, dataclass
 from typing import Callable, Iterator
-from buna.citation_tokens import citation_mask
+from buna.citation_tokens import APA_VERSION, improved_citation_mask as citation_mask
 from buna.span_evaluation import ledger_sha256
 from buna.match_diagnostics import alignment_details, raw_citation_pairs
 from buna.improved_layout import LAYOUT_VERSION, running_headers
@@ -578,6 +578,7 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
                 "score_basis": SCORE_BASIS, "score_policy_version": SCORE_POLICY_VERSION,
                 "manuscript_scope": scope, "improved_eng_config": asdict(cfg),
                 "citation_qualification": {
+                    "recognizer_version": APA_VERSION,
                     "scope": "Similar only; Exact unchanged",
                     "seed": "Three consecutive equal noncitation words at original positions on both sides",
                     "minimum_and_density_numerator": "Noncitation equal pairs only",
