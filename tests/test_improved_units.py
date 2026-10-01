@@ -239,3 +239,55 @@ def test_contiguous_exact_stopword_edges_unchanged_and_merged_padding_not_restor
                  prepare=lambda p: trim_weak_edges(p, words))
     assert all((0, 0) not in p for p in paths)
     assert {pair for p in paths for pair in p} == set(full[1:])
+
+
+def test_new_ledger_reference_probe_credits_whole_units_and_exports_original_pairs():
+    from buna.span_evaluation import _reference_probe
+    target = "alpha = beta gamma (Gan et al.,2024) delta x epsilon"
+    source = "alpha = beta gamma (Gan et al.,2024) delta y epsilon"
+    result = compare(target, source)
+    ledger = tokens(target)
+    reference = {"source_id": "s", "word_start": 0, "word_end": len(ledger),
+                 "source_word_start": 0, "source_word_end": len(tokens(source))}
+    probe = _reference_probe(result, reference, {"s": doc(source + " ending")}, set(range(len(ledger))))
+    assert probe["verified_citation_words"] == 4
+    assert probe["qualifying_matched_words"] == 10
+    assert probe["matched_non_citation_words"] == 6
+    assert probe["verified_citation_pairs"] == [[i, i] for i in range(4, 8)]
+    assert probe["maximum_gap"] == 1
+
+
+def test_operator_ledger_normalization_keeps_original_tokens_of_other_models():
+    from buna.classified import classify_documents
+    from buna.comparison import compare_documents
+    phrase = "alpha = beta gamma < delta epsilon > zeta eta theta"
+    for detector in (classify_documents, compare_documents):
+        first = detector(doc(phrase), [{"id": "s", "document": doc(phrase + " ending")}])
+        second = detector(doc(phrase.replace("=", "").replace("<", "").replace(">", "")),
+                          [{"id": "s", "document": doc(phrase + " ending")}])
+        assert first["metrics"] == second["metrics"]
+
+
+def test_trimmed_atomic_paths_equal_exhaustive_reference_pair_union():
+    from test_improved_eng import oracle
+    from buna.improved_eng import accepts_similar, valid
+    for edge, gap in itertools.product(("the", "p"), (1, 4)):
+        target = f"{edge} alpha beta gamma (Smith 2005) delta epsilon zeta eta"
+        source = f"{edge} " + "unmatched " * gap + "alpha beta gamma (Smith 2005) delta epsilon zeta eta"
+        mt, st = tokens(target), tokens(source)
+        mw, sw = [t[0] for t in mt], [t[0] for t in st]
+        mc, sc = improved_citation_mask(target, mt), improved_citation_mask(source, st)
+        blocks = _CitationBlocks(mw, sw, apa_units(target, mt), apa_units(source, st),
+                                 [True] * len(mw), [True] * len(sw), None, None)
+        expected = set()
+        for path in oracle(mw, sw):
+            path = trim_weak_edges(path, mw, blocks)
+            if path and valid(path) and accepts_similar(path, mw, mc, sc, blocks):
+                expected.update(path)
+        actual = set()
+        for path in search(mw, sw, [True] * len(mw), [True] * len(sw), lambda: None,
+                           m_cited=mc, s_cited=sc, citation_blocks=blocks,
+                           prepare_path=lambda p: trim_weak_edges(p, mw, blocks)):
+            if accepts_similar(path, mw, mc, sc, blocks):
+                actual.update(path)
+        assert actual == expected

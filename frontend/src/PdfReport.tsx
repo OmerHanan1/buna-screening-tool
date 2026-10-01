@@ -40,7 +40,7 @@ export default function PdfReport({ report, jobId, engineVersion }: { report: Re
     {report.result.state !== "complete" && <p role="status" className="reader-notice">{report.result.heading}. {report.result.explanation}</p>}
     {report.comparison_model === "experimental-ordered" && <p className="reader-notice">Experimental model. Accuracy and vendor equivalence are not established.</p>}
     {report.comparison_model === "improvedEng" && <p className="reader-notice">improvedEng: experimental ordered lexical matching. Accuracy and vendor equivalence are not established.</p>}
-    {["improvedEng-v2", "improvedEng-v1-citation", "improvedEng-v3-precision", "improvedEng-v3.1-precision"].includes(report.algorithm_version || "") && <a href={`/api/jobs/${jobId}/report.csv`} download="similar-diagnostics.csv">Download Similar diagnostics CSV</a>}
+    {["improvedEng-v2", "improvedEng-v1-citation", "improvedEng-v3-precision", "improvedEng-v3.1-precision", "improvedEng-v3.2-precision"].includes(report.algorithm_version || "") && <a href={`/api/jobs/${jobId}/report.csv`} download="similar-diagnostics.csv">Download Similar diagnostics CSV</a>}
     {scope?.requested === "abstract-onward" && scope.applied === "whole-document" &&
       <p className="reader-notice">Abstract heading not detected; the whole manuscript was analyzed (front matter was not excluded).</p>}
     <p className="pdf-caption">Highlighted sequences point to the numbered comparison papers. This is text overlap for review, not a plagiarism verdict.</p>

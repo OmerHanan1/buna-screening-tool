@@ -26,7 +26,8 @@ def citation_mask(text, tokens):
 
 
 # Opt-in: old engines and saved-report evaluation keep their historical grammar.
-APA_VERSION = "apa-author-year-original-offsets-v2"
+APA_VERSION = "apa-author-year-original-offsets-v3"
+APA_CREDIT_VERSION = "complete-identical-apa-unit-v1"
 _INITIALS = r"(?:[A-Z]\.\s*){1,3}"
 _PARTICLE = r"(?:(?:[Vv]an(?:\s+der)?|[Vv]on|[Dd]e(?:\s+la)?|[Dd]el|[Dd]a)\s+)?"
 _AUTHOR = rf"(?:{_INITIALS})?{_PARTICLE}{_NAME}(?:,\s*{_INITIALS})?"
@@ -36,7 +37,7 @@ _APA_NARRATIVE = re.compile(rf"(?<!\w){_AUTHORS}\s*\({_YEARS}(?:\s*;\s*{_YEARS})
 _APA_INLINE = re.compile(rf"(?<!\w){_AUTHORS}\s*,\s*{_YEARS}\b")
 _APA_ITEM = re.compile(rf"\s*(?:(?:see|also|e\.g\.,?|cf\.)\s+)*{_AUTHORS}\s*,?\s+{_YEARS}\s*")
 _APA_UNIT_ITEM = re.compile(
-    rf"\s*(?:(?:see|also|e\.g\.,?|cf\.)\s+)*(?P<unit>{_AUTHORS}\s*,?\s+{_YEARS})\s*")
+    rf"\s*(?:(?:see|also|e\.g\.,?|cf\.)\s+)*(?P<unit>{_AUTHORS}(?:\s*,\s*|\s+){_YEARS})\s*")
 _APA_PARENS = re.compile(r"\([^()]{1,1000}\)")
 _NUMERIC_CITATION = re.compile(r"\[\s*\d+(?:\s*[,;–-]\s*\d+)*\s*\]")
 _NON_AUTHOR = frozenset(("study studies experiment experiments table figure anova ancova manova "

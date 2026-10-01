@@ -16,6 +16,8 @@ FIELDS = [
     "local_eligible_words", "distinct_matched_content_words", "strongest_four_word_run_content_words",
     "strongest_three_word_run_meaningful_words",
     "content_policy_version", "alignment_alternative_count", "unique_target_matched_words",
+    "qualifying_prose_words", "verified_citation_words", "verified_citation_pairs",
+    "excluded_citation_pairs", "matched_operator_words", "edge_padding_policy",
 ]
 
 

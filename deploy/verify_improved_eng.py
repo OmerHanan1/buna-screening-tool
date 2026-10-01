@@ -69,11 +69,11 @@ def verify(count=61, words=12000, pdf=True):
     assert all(row["status"] == "compared" for row in result["source_coverage"])
     assert not result["metrics"]["truncated"]
     assert result["comparison_model"] == "improvedEng"
-    assert result["algorithm_version"] == "improvedEng-v3.1-precision"
+    assert result["algorithm_version"] == "improvedEng-v3.2-precision"
     assert result["improved_eng"]["calibration_ready"]
     assert result["improved_eng"]["similar_diagnostics"]
     assert result["metrics"]["score_policy_version"] == "eligible-manuscript-v1"
-    assert result["settings"]["eligibility_profile"] == "improvedEng-layout-longquotes-v1"
+    assert result["settings"]["eligibility_profile"] == "improvedEng-layout-longquotes-operators-v2"
     assert loads == count
     result["papers"] = sources
     pdf_result = {}

@@ -1,20 +1,34 @@
 # improvedEng: ordered alignment with precision exclusions
 
 New comparisons use model ID `improvedEng`, algorithm version
-`improvedEng-v3.1-precision`. Standard remains the default; Standard 2.5.4 and
+`improvedEng-v3.2-precision`. Standard remains the default; Standard 2.5.4 and
 classified-v1.1 matching and denominator behavior are unchanged. Saved reports
 retain their original rules and values; neither library caches nor historical
 reports are rewritten or replayed.
 
-The narrow v3.1 follow-up counts literal numbers and statistical tokens as
-meaningful Similar words and relaxes the acceptance anchor from four words/two
-content words to **three consecutive words/one meaningful word**. The minimum
-of four distinct shared meaningful types stays in place. No other alignment,
-quotation, citation, header, Exact, denominator or evidence-budget rule changes.
-This deliberately accepts more numeric/statistical wording; it is not a measured
-precision/recall improvement on the unavailable user report.
+v3.2 adds literal operator units, complete identical APA-unit credit and
+conservative weak-edge trimming, in that order. The v3.1 requirements of four
+distinct meaningful types and a noncitation three-word run with one meaningful
+word stay in place. These are explicit application-policy choices, not vendor
+facts or measured precision/recall changes on the unavailable user report.
 
-## 1. Running headers and original coordinates
+## 1. Literal operator word units
+
+`literal-operators-equals-less-greater-approx-v1` merges the four literal
+characters `=`, `<`, `>` and `≈` into the existing lexical token ledger on both
+documents. Each has its actual one-character offset. They count toward nine
+matched units, spans, gaps, density and the eligible denominator, but **not**
+toward meaningful types or meaningful anchor words. No number wildcard exists.
+`M=0.06` and `M=0.08` share `M` and `=`, not their different numeric values.
+
+`<=`, `>=` and `==` contain two literal units; `!=` contributes only `=`.
+There is no added equivalence for `≤`, `≥`, `≠`, fullwidth symbols or other
+mathematical encodings. Whitespace/punctuation never becomes synthetic content.
+The original cache bytes and PDF coordinates remain unchanged. The word ledger
+hash and normalization/eligibility profile change only for new improvedEng runs.
+Short-quotation length is measured with these same tokenizer units.
+
+## Running headers and original coordinates
 
 `repeated-numbered-page-edge-v1` derives a logical token view on both documents.
 The canonical extracted text, tokens, PDF offsets and pages remain unchanged.
@@ -34,7 +48,7 @@ Confirmed header words are absent from logical alignment and consume zero gap.
 Body words on either side of a removed header can align contiguously. Every
 published pair, character span and score position maps back to the original
 ledger; no header rectangle is included in a merged highlight. The normalization
-version changes to `nfkc-casefold-literal-numeric-document-local-hyphens-layout-v2`.
+version is `nfkc-casefold-literal-numeric-document-local-hyphens-layout-operators-v3`.
 
 ## Retained evidence and scoring priority
 
@@ -77,7 +91,7 @@ no tuning toward an aggregate score.
 Explicit bracketed numeric and author-year/narrative citation syntax is masked
 in the **original word ledger**. It is not deleted or compacted. Recognition
 is syntactic, not a guess about every surname or year in prose.
-`apa-author-year-original-offsets-v2` recognizes parenthetical semicolon lists,
+`apa-author-year-original-offsets-v3` recognizes parenthetical semicolon lists,
 multiline author-year forms, initials, multiple authors with `&`/`and`, narrative
 `Smith (2005)` / `Smith et al. (2005)`, and running `Smith et al., 2005` text.
 Bare years, statistical parentheses, definitions and standalone `et al.` without
@@ -89,30 +103,62 @@ are rejected, including at passage boundaries. Citations are not removed to
 create artificial three-word adjacency. Function words and literal numbers in
 ordinary prose remain eligible for retrieval.
 
-Every accepted Similar alignment must independently contain nine equal
-non-citation word pairs. Citation tokens on either side cannot increase the
-minimum-match count or density numerator. They remain intervening tokens:
-five citation words consume a five-word gap, six break it, and nine prose
-matches spanning sixteen original tokens fail 60% density. Citations therefore
-cannot rescue prose that fails the original gap/density rules.
+`complete-identical-apa-unit-v1` permits credit only for an entire author/year
+unit whose normalized words match contiguously in both original ledgers.
+Every author, initial, `et al.`, conjunction word and year/suffix in that unit
+must match. No gaps, partial author suffix, equal year alone, bag-of-authors
+comparison, deleted header or quotation/bibliography boundary can create
+credit. An identical complete unit inside otherwise different semicolon lists
+may qualify independently. Introductory `e.g.`/`see` tokens do not qualify as
+part of that author/year unit. Bracketed numeric references are not APA units.
 
-Citation text can remain in passage context but is not painted as qualifying
-Similar evidence. `qualifying_aligned_pairs` are the pairs that satisfy the
-model's qualification rule. `raw_aligned_pairs` may additionally include equal
+Verified units are atomic alignment chains: a path/window can take the whole
+unit or none of it. They count toward the nine-unit minimum, density numerator
+and scored positions, but never toward meaningful types or the noncitation
+retrieval/acceptance anchor. Partial or unmatched citation words stay excluded
+and consume gaps/spans exactly as before. Thus five unverified citation units
+consume five gap positions and six break a path; no zero-width citation join
+is introduced. Citation-only Exact runs of at least nine remain supported;
+there is no citation-only Similar retrieval.
+
+Verified citation words are painted at their original offsets.
+`qualifying_aligned_pairs` includes verified complete units plus eligible
+noncitation pairs. `raw_aligned_pairs` may additionally include equal
 citation pairs aligned inside already accepted gaps for diagnostics only.
 `citation_matches` reports those actual diagnostic pairs, while
 `citation_tokens_inside_span` counts all citation material inside the span.
-All Similar gaps and density numerators use only qualifying non-citation pairs,
-never these extra raw pairs. Raw diagnostic pairing cannot rescue a failed match.
+All Similar gaps and density numerators use only the qualifying pairs, never
+the extra raw pairs. `qualifying_prose_words`, `verified_citation_words`,
+`verified_citation_pairs` and `excluded_citation_pairs` distinguish the roles.
+Raw diagnostic pairing cannot rescue a failed match.
 
 **Exact citation credit is unchanged** inside contiguous eligible runs of at
 least nine normalized words, after header removal. Exact diagnostic rows
 explicitly identify this exception: seven prose words plus two contiguous equal
-citation words qualify as nine Exact words, but not nine Similar words.
-The citation correction applies to Similar,
-not a silent modification of the independent Exact path.
+citation words qualify as nine Exact words. They may now qualify Similar only
+when those citation words form a complete verified unit and the unchanged
+meaningful/anchor/gap/density guards also pass. No additional restriction is
+applied to the independent Exact path.
 
-## 4. Individual quotation exclusion
+## 3. Weak aligned-edge padding
+
+`weak-one-two-unit-fringe-v1` removes only a contiguous **one- or two-pair outer
+run**, separated from the next run by a positive gap on either side, when every
+word in that outer run is nonmeaningful and no pair belongs to a complete
+verified citation unit. Repeat at either edge as necessary. Typical removable
+fringes are a detached `the`, `of the`, or operator-only fragment.
+
+One/two meaningful edge words, verified full citations, runs of at least three
+stopwords and every internal run/gap remain untouched. Genuinely contiguous
+Exact evidence is unchanged. This deliberately does not trim every short edge.
+Trimming occurs before candidate windows and acceptance; shortened windows
+are re-evaluated, and compatible merges cannot restore trimmed padding.
+All minima, spans, densities, score positions and highlights use the resulting
+alignment, not the context sentence. A fringe that previously supplied the
+ninth unit can no longer rescue an eight-unit match. Per-source
+`trimmed_edge_pair_occurrences` is a processing count, not unique removed words.
+
+## Individual quotation exclusion
 
 Balanced quotes containing at most three tokenizer words are ignored for
 exclusion, including single/double/curly/nested technical names. A long outer
@@ -130,7 +176,7 @@ surrounding context sentence. Original source excerpts are not rewritten.
 With exclusion off, all quotation words are eligible (normal APA rules still
 apply). Header/front/bibliography/long-quote denominator overlaps count once.
 
-## 3. Similar content and contiguous-run acceptance
+## Similar content and contiguous-run acceptance
 
 In addition to the three/nine/five/60% retrieval policy, a Similar path needs
 **four distinct shared matched meaningful words**, plus a **three-word contiguous
@@ -148,19 +194,19 @@ matching `\d+(?:[.,]\d+)*` are also meaningful. Existing casefolding makes
 normalization. Different numbers count as distinct types only if each actually
 matches on both sides. Repeated equal numbers count once toward distinctness.
 Mixed alphanumeric tokens are not newly meaningful. Citation tokens, including
-years, remain ineligible for Similar seeds, meaningful types, nine-word minimum
-and density. There is no stemming: `level` and `levels` remain different types.
+years, remain ineligible for Similar seeds and meaningful types; only verified
+whole APA units receive minimum/density credit. The four operator characters
+are not meaningful. There is no stemming: `level` and `levels` remain different types.
 Unmatched context words cannot satisfy either requirement.
 
 The saved `distinct_matched_content_words` diagnostic retains its field name
 for compatibility but uses the saved content-policy version's definition.
-v3.1 records `strongest_three_word_run_meaningful_words`; old four-word
+v3.1 and later record `strongest_three_word_run_meaningful_words`; old four-word
 diagnostics remain readable/exportable without recomputing saved reports.
-The algorithm/content-policy versions distinguish matching behavior; the
-normalization and eligibility versions are unchanged because neither token
-normalization nor denominator masks changed.
+The algorithm, word, citation-credit, edge and eligibility versions distinguish
+the new behavior without rewriting historical reports.
 
-## 5. Evidence consolidation
+## Evidence consolidation
 
 Identical paths are discarded before reservation. Overlapping compatible paths
 are unioned only when they share an actual aligned pair and the union remains
@@ -193,6 +239,8 @@ Each scored or raw excluded alignment records:
 * Citation pairs in the alignment and citation tokens inside each span.
 * Header and quote counts, local eligible words, distinct matched content types,
   three-word anchor strength, alternative count and original/logical spans.
+* Matched operator units, verified whole-citation versus excluded citation
+  pairs, qualifying prose count and weak-edge policy.
 
 Per-source rejection counters identify the distinct-content or three-word-anchor
 qualification stage without storing rejected candidate text.
@@ -213,8 +261,9 @@ Evidence/diagnostic memory exhaustion preserves a valid partial report rather
 than looking up a missing diagnostic entry and losing the report.
 
 The shared `eligible-manuscript-v1` **arithmetic** remains unchanged. The explicit
-new `eligibility_profile: improvedEng-layout-longquotes-v1` records this model's
-header/short-quote/long-quote masks without changing other models. Unmatched
+new `eligibility_profile: improvedEng-layout-longquotes-operators-v2` records this
+model's operator-inclusive ledger and header/short-quote/long-quote masks
+without changing other models. Unmatched
 eligible words, citations and rejected small matches still count.
 Excluded/unavailable sources never remove manuscript denominator words.
 

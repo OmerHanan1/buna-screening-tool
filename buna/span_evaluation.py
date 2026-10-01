@@ -120,6 +120,7 @@ def _reference_probe(report, reference, documents, eligible):
     excluded_source = _mask(st, _intervals(source))
     hard_target, hard_source = set(range(len(mt))) - eligible, excluded_source
     m_map, s_map = list(range(len(mt))), list(range(len(st)))
+    blocks = None
     if report["settings"].get("eligibility_profile") in {
         "improvedEng-layout-longquotes-v1", "improvedEng-layout-longquotes-operators-v2",
     }:
@@ -129,6 +130,12 @@ def _reference_probe(report, reference, documents, eligible):
         mh, _ = running_headers({"text": manuscript, "pages": report["manuscript_pages"]}, mt)
         sh, _ = running_headers(source, st)
         mc, sc = improved_citation_mask(manuscript, mt, mh), improved_citation_mask(source["text"], st, sh)
+        if report["settings"].get("citation_qualification", {}).get("credit_version") == "complete-identical-apa-unit-v1":
+            from buna.citation_tokens import apa_units
+            from buna.improved_eng import _CitationBlocks
+            m_units, s_units = apa_units(manuscript, mt, mh), apa_units(source["text"], st, sh)
+        else:
+            m_units, s_units = [], []
         sq, _ = _long_quotes(source["text"], st, sh)
         hard_target = {i for interval in report["classification"]["coverage_intervals"]
                        if interval["state"] in {"excluded-front-matter", "excluded-bibliography"}
@@ -145,20 +152,36 @@ def _reference_probe(report, reference, documents, eligible):
         eligible = {i for i, original in enumerate(m_map) if original in eligible}
         ma, mb = bisect_left(m_map, ma), bisect_left(m_map, mb)
         sa, sb = bisect_left(s_map, sa), bisect_left(s_map, sb)
+        if m_units and s_units:
+            blocks = _CitationBlocks(
+                [t[0] for t in mt], [t[0] for t in st],
+                [(bisect_left(m_map, a), bisect_left(m_map, b)) for a, b in m_units],
+                [(bisect_left(s_map, a), bisect_left(s_map, b)) for a, b in s_units],
+                [i in eligible for i in range(len(mt))], [not value for value in excluded_source], None, None)
+
+    def equal_count(a, b):
+        i, j = ma + a, sa + b
+        if (i in eligible and not excluded_source[j] and not mc[i] and not sc[j]
+                and mt[i][0] == st[j][0]):
+            return 1
+        if blocks and blocks.entry((i, j), 1):
+            m, s = blocks.pair_units((i, j))
+            if m[1] <= mb and s[1] <= sb:
+                return m[1] - m[0]
+        return 0
+
     dp = [[0] * (sb - sa + 1) for _ in range(mb - ma + 1)]
     for a in range(mb - ma - 1, -1, -1):
         for b in range(sb - sa - 1, -1, -1):
-            equal = (ma + a in eligible and not excluded_source[sa + b] and not mc[ma + a] and not sc[sa + b]
-                     and mt[ma + a][0] == st[sa + b][0])
-            dp[a][b] = 1 + dp[a + 1][b + 1] if equal else max(dp[a + 1][b], dp[a][b + 1])
+            count = equal_count(a, b)
+            dp[a][b] = max(count + dp[a + count][b + count] if count else 0, dp[a + 1][b], dp[a][b + 1])
     a = b = 0
     path = []
     while a < mb - ma and b < sb - sa:
-        equal = (ma + a in eligible and not excluded_source[sa + b] and not mc[ma + a] and not sc[sa + b]
-                 and mt[ma + a][0] == st[sa + b][0])
-        if equal:
-            path.append((ma + a, sa + b))
-            a, b = a + 1, b + 1
+        count = equal_count(a, b)
+        if count and dp[a][b] == count + dp[a + count][b + count]:
+            path.extend((ma + a + offset, sa + b + offset) for offset in range(count))
+            a, b = a + count, b + count
         elif dp[a + 1][b] >= dp[a][b + 1]:
             a += 1
         else:
@@ -174,11 +197,30 @@ def _reference_probe(report, reference, documents, eligible):
                 "citation_tokens_inside_span": {"manuscript": sum(mc[ma:mb]), "source": sum(sc[sa:sb])},
                 "reason": "No equal eligible noncitation words in these actual labeled manuscript/source ranges."}
     details = alignment_details(tuple(path), [w[0] for w in mt], [w[0] for w in st], mc, sc)
+    if blocks:
+        from buna.improved_eng import measures
+        info = measures(tuple(path))
+        verified = blocks.verified_pairs(path)
+        mg = [b[0] - a[0] - 1 for a, b in zip(path, path[1:])]
+        sg = [b[1] - a[1] - 1 for a, b in zip(path, path[1:])]
+        details.update(
+            qualifying_matched_words=len(path), verified_citation_words=len(verified),
+            verified_citation_pairs=[[m_map[a], s_map[b]] for a, b in sorted(verified)],
+            manuscript_density=info["manuscript_similarity"], source_density=info["source_similarity"],
+            global_density=min(info["manuscript_similarity"], info["source_similarity"]),
+            manuscript_gap_sequence=mg, source_gap_sequence=sg, maximum_gap=max(mg + sg, default=0),
+            total_gap_words=sum(mg + sg), number_of_gaps=sum(bool(a or b) for a, b in zip(mg, sg)),
+            citation_token_contribution={"similar_seed": 0, "similar_minimum": len(verified),
+                                         "similar_density_numerator": len(verified),
+                                         "gap_and_span_positions_preserved": True},
+        )
     details.update(logical_manuscript_span=details["manuscript_span"], logical_source_span=details["source_span"],
                    manuscript_span=[m_map[path[0][0]], m_map[path[-1][0]] + 1],
                    source_span=[s_map[path[0][1]], s_map[path[-1][1]] + 1])
     if details["seed"]:
         details["seed"]["aligned_pairs"] = [[m_map[a], s_map[b]] for a, b in details["seed"]["aligned_pairs"]]
+    details["citation_matches"]["aligned_pairs"] = [
+        [m_map[a], s_map[b]] for a, b in details["citation_matches"]["aligned_pairs"]]
     return {"status": "computed", "source": reference["source_id"],
             "basis": "Diagnostic-only deterministic LCS in labeled bounds; not a substitute for detector alternative search.",
             "crosses_exclusion_boundary": (any(i in hard_target for i in range(path[0][0], path[-1][0] + 1))

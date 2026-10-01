@@ -9,7 +9,7 @@ from collections import defaultdict
 from bisect import bisect_left, bisect_right
 from dataclasses import asdict, dataclass
 from typing import Callable, Iterator
-from buna.citation_tokens import APA_VERSION, apa_units, improved_citation_mask as citation_mask
+from buna.citation_tokens import APA_CREDIT_VERSION, APA_VERSION, apa_units, improved_citation_mask as citation_mask
 from buna.span_evaluation import ledger_sha256
 from buna.match_diagnostics import alignment_details, raw_citation_pairs
 from buna.improved_layout import LAYOUT_VERSION, running_headers
@@ -29,7 +29,7 @@ from buna.score_policy import (
 )
 
 MODEL_ID = "improvedEng"
-VERSION = "improvedEng-v3.1-precision"
+VERSION = "improvedEng-v3.2-precision"
 NORMALIZATION_VERSION = "nfkc-casefold-literal-numeric-document-local-hyphens-layout-operators-v3"
 WORKING_INDEX_BYTES = 128 * 1024 * 1024
 Pair = tuple[int, int]
@@ -808,7 +808,7 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
                     "matched_word_count": len(path), "raw_matched_word_count": len(raw_pairs),
                     "alignment_alternative_count": len(alternatives), "unique_target_matched_words": len(m_positions),
                     "source": sid, "source_content_sha256": row["source_content_sha256"],
-                    "match_kind": kind, "exact_citation_policy": "unchanged; citation qualification correction applies to Similar",
+                    "match_kind": kind, "exact_citation_policy": "Unchanged contiguous Exact credit; full-unit verification applies to Similar",
                     "scored": not excluded,
                 }
                 (raw if excluded else matches).append(match)
@@ -891,10 +891,12 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
                 "manuscript_scope": scope, "improved_eng_config": asdict(cfg),
                 "citation_qualification": {
                     "recognizer_version": APA_VERSION,
-                    "scope": "Similar only; Exact unchanged",
+                    "credit_version": APA_CREDIT_VERSION,
+                    "scope": "Complete identical author/year units may qualify Similar; contiguous Exact unchanged",
                     "seed": "Three consecutive equal noncitation eligible words at header-cleaned positions on both sides",
-                    "minimum_and_density_numerator": "Noncitation equal pairs only",
-                    "gap_and_span_accounting": "Header-cleaned positions; citations and long quotes retain intervening gap/span positions",
+                    "minimum_and_density_numerator": "Eligible prose/operators plus verified complete contiguous APA units; no partial citation credit",
+                    "meaningful_word_types": "Noncitation lexical words, literal numbers/statistics only; operators and citations are not meaningful",
+                    "gap_and_span_accounting": "Header-cleaned positions; unverified citations and long quotes consume gap/span positions",
                 },
                 "normalization_version": NORMALIZATION_VERSION, "source_time_limit_seconds": source_seconds,
                 "layout_version": LAYOUT_VERSION,
@@ -931,11 +933,11 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
                          "audit_complete": bool(coverage) and all(
                              r["audit_search_complete"] or r["status"] in {"excluded-by-user", "excluded-identical"}
                              for r in coverage),
-                         "search": "Three-word-seeded ordered alternatives; four distinct meaningful words (including literal numbers/statistics) and a contiguous three-word run with one meaningful word required for Similar only. Headers removed logically; citations and long quotes retain gap positions."},
+                         "search": "Pure prose three-word-seeded ordered alternatives with literal operator units and verified complete APA chains. Four distinct noncitation meaningful types and a three-word run with one meaningful word; weak one/two-unit edges trimmed. Headers removed logically, unverified citations and long quotes retain gap positions."},
         "methodology": {
             "name": MODEL_ID, "version": VERSION, "normalization": NORMALIZATION_VERSION,
             "exact": "At least nine contiguous equal eligible normalized words after header removal; contiguous citations retain Exact credit; short quotes remain eligible.",
-            "similar": "At least nine eligible noncitation equal words, four distinct meaningful types (including literal numbers/statistics), and a three-word contiguous exact run containing at least one meaningful word. Retrieval seed three, gap at most five and global density at least 60% independently per side. Citations and enabled long quotes consume gap/span positions.",
+            "similar": "At least nine eligible equal units including literal =, <, >, approx-equal and complete identical contiguous APA author/year units. Four distinct noncitation meaningful types and a pure noncitation three-word exact run containing one meaningful word. Weak nonmeaningful one/two-unit fringes removed; meaningful edges/internal gaps/Exact preserved. Gap at most five and global density at least 60% per side. Unverified citations and long quotes consume gaps.",
             "denominator": DENOMINATOR_DESCRIPTION,
             "limitations": "Lexical hypotheses, not vendor parameters. No seed means no candidate. Literal numbers; no citation deletion. Ambiguous headers retained with warnings. Resource-limited search explicitly partial.",
         },
