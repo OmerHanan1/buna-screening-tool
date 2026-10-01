@@ -10,6 +10,7 @@ from typing import Callable, Iterator
 from buna.citation_tokens import citation_mask
 from buna.span_evaluation import ledger_sha256
 from buna.match_diagnostics import alignment_details, raw_citation_pairs
+from buna.improved_layout import LAYOUT_VERSION, running_headers
 
 from buna.classified import (
     _attribution, _exact_runs, _regions, _side, tokens,
@@ -26,7 +27,7 @@ from buna.score_policy import (
 
 MODEL_ID = "improvedEng"
 VERSION = "improvedEng-v1-citation"
-NORMALIZATION_VERSION = "nfkc-casefold-literal-numeric-document-local-hyphens-v1"
+NORMALIZATION_VERSION = "nfkc-casefold-literal-numeric-document-local-hyphens-layout-v2"
 WORKING_INDEX_BYTES = 128 * 1024 * 1024
 Pair = tuple[int, int]
 Path = tuple[Pair, ...]
@@ -282,15 +283,18 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
         raise ValueError("Manuscript exceeds the 1,000,000-character comparison limit.")
     # A stable manuscript ledger must not depend on source order or availability.
     mt = tokens(text, _line_join_words([text]), check)
-    mw = [t[0] for t in mt]
-    m_cited = citation_mask(text, mt)
+    headers, layout_warnings = running_headers(manuscript, mt)
+    m_map = [i for i in range(len(mt)) if not headers[i]]
+    mw = [mt[i][0] for i in m_map]
+    original_cited = citation_mask(text, mt)
+    m_cited = [original_cited[i] for i in m_map]
     bib = _mask(mt, _intervals(manuscript))
     quote_intervals, uncertain_intervals = _quotation_intervals(text)
     quoted, uncertain = _mask(mt, quote_intervals), _mask(mt, sorted(uncertain_intervals))
     front = [False] * len(mt)
     scope = {"requested": manuscript_scope, "applied": "whole-document", "start_offset": None,
              "start_page": None, "heading_text": None}
-    warnings = list(manuscript.get("warnings", []))
+    warnings = list(manuscript.get("warnings", [])) + layout_warnings
     if manuscript_scope == "abstract-onward":
         found = abstract_start(manuscript)
         if found["start_offset"] is not None:
@@ -298,7 +302,8 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
             front = [t[1] < found["start_offset"] for t in mt]
         else:
             warnings.append("Abstract heading not detected; the whole manuscript was analyzed (front matter was not excluded).")
-    eligible = [not (b or f or (exclude_quotes and q)) for b, f, q in zip(bib, front, quoted)]
+    eligible = [not (b or f or h or (exclude_quotes and q)) for b, f, h, q in zip(bib, front, headers, quoted)]
+    m_ok = [eligible[i] for i in m_map]
     accounting = manuscript_word_accounting(eligible, front, bib, quoted, exclude_quotes=exclude_quotes)
     denominator = accounting["score_denominator_words"]
     numbers = {str(s.get("id", f"source-{i + 1}")): s.get("source_number", i + 1) for i, s in enumerate(sources)}
@@ -368,11 +373,16 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
         try:
             budget()
             st = tokens(document["text"], _line_join_words([document["text"]]), budget)
-            sw = [t[0] for t in st]
-            row["source_total_words"] = len(sw)
-            s_cited = citation_mask(document["text"], st)
+            s_headers, s_warnings = running_headers(document, st)
+            warnings.extend(f"Source {sid}: {warning}" for warning in s_warnings)
+            s_map = [i for i in range(len(st)) if not s_headers[i]]
+            sw = [st[i][0] for i in s_map]
+            row.update(source_total_words=len(st), header_removed_words=sum(s_headers))
+            source_cited = citation_mask(document["text"], st)
+            s_cited = [source_cited[i] for i in s_map]
             row["source_content_sha256"] = hashlib.sha256(document["text"].encode()).hexdigest()
-            s_ok = [not b for b in _mask(st, _intervals(document))]
+            s_bib = _mask(st, _intervals(document))
+            s_ok = [not s_bib[i] for i in s_map]
             if sw == mw:
                 row.update(status="excluded-identical", reason="Identical normalized manuscript/source text.")
                 done()
@@ -382,30 +392,30 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
             # Publish cheap real exact evidence even if the harder graph later stops.
             from buna.classified import _Limit as ExactLimit
             try:
-                for a, e, b, f in _exact_runs(mw, eligible, _regions(eligible), sw, s_ok, _regions(s_ok), 9, budget):
+                for a, e, b, f in _exact_runs(mw, m_ok, _regions(m_ok), sw, s_ok, _regions(s_ok), 9, budget):
                     _collect(scored_paths, tuple(zip(range(a, e), range(b, f))), evidence_budget, budget)
             except ExactLimit as exc:
                 raise SearchLimit(exc.kind, exc.reason) from exc
-            for path in search(mw, sw, eligible, s_ok, budget, m_cited=m_cited, s_cited=s_cited,
+            for path in search(mw, sw, m_ok, s_ok, budget, m_cited=m_cited, s_cited=s_cited,
                                working_bytes=WORKING_INDEX_BYTES):
                 _collect(scored_paths, path, evidence_budget, budget)
             row["scored_search_complete"] = True
             phase = "audit"
             # Audit work must not consume the rest of the budget for later sources.
             audit_deadline = min(started + fair_seconds, time.monotonic() + fair_seconds * 0.1)
-            if not all(eligible) or not all(s_ok):
+            if not all(m_ok) or not all(s_ok):
                 if audit_memory_exhausted:
                     raise SearchLimit("audit-memory-limit", "Optional excluded-text audit memory was exhausted; scored search is complete and unchanged.")
                 for path in search(mw, sw, [True] * len(mw), [True] * len(sw), budget,
                                    m_cited=m_cited, s_cited=s_cited, working_bytes=WORKING_INDEX_BYTES):
                     ma, mb, sa, sb = path[0][0], path[-1][0] + 1, path[0][1], path[-1][1] + 1
-                    if not all(eligible[ma:mb]) or not all(s_ok[sa:sb]):
+                    if not all(m_ok[ma:mb]) or not all(s_ok[sa:sb]):
                         _collect(audit_paths, path, audit_budget, budget)
                 try:
                     for a, e, b, f in _exact_runs(mw, [True] * len(mw), [0] * len(mw), sw, [True] * len(sw),
                                                 [0] * len(sw), 9, budget):
                         path = tuple(zip(range(a, e), range(b, f)))
-                        if not all(eligible[a:e]) or not all(s_ok[b:f]):
+                        if not all(m_ok[a:e]) or not all(s_ok[b:f]):
                             _collect(audit_paths, path, audit_budget, budget)
                 except ExactLimit as exc:
                     raise SearchLimit(exc.kind, exc.reason) from exc
@@ -427,8 +437,9 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
             while paths:
                 path = paths.pop()
                 check()
-                m_positions, s_positions = [p[0] for p in path], [p[1] for p in path]
-                ma, mb, sa, sb = path[0][0], path[-1][0] + 1, path[0][1], path[-1][1] + 1
+                original_path = tuple((m_map[a], s_map[b]) for a, b in path)
+                m_positions, s_positions = [p[0] for p in original_path], [p[1] for p in original_path]
+                ma, mb, sa, sb = m_positions[0], m_positions[-1] + 1, s_positions[0], s_positions[-1] + 1
                 info = measures(path)
                 kind = "exact" if info["matched_words"] == info["manuscript_span"] == info["source_span"] else "similar"
                 # Reserve strings and offset arrays before materializing the report.
@@ -461,7 +472,7 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
                     reasons.append("bibliography")
                 if exclude_quotes and any(quoted[ma:mb]):
                     reasons.append("recognized-quotation")
-                if not all(s_ok[sa:sb]):
+                if any(s_bib[sa:sb]):
                     reasons.append("source-bibliography")
                 match = {
                     "source_id": sid, "source_number": numbers[sid], "source_content_sha256": row["source_content_sha256"],
@@ -470,7 +481,7 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
                                    "equal_spans": m_side["equal_spans"]},
                     "source": {**s_side, "match_start": s_side["start"], "match_end": s_side["end"],
                                "highlights": [[a - s_side["start"], b - s_side["start"]] for a, b in s_side["equal_spans"]]},
-                    "aligned_pairs": [list(p) for p in path], **info,
+                    "aligned_pairs": [list(p) for p in original_path], **info,
                     "similarity": min(info["manuscript_similarity"], info["source_similarity"]),
                     "scored_word_positions": [] if excluded else m_positions,
                     "included_words": 0 if excluded else len(path), "excluded_words": len(path) if excluded else 0,
@@ -480,10 +491,20 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
                     "order": {"out_of_order_blocks": 0},
                 }
                 raw_pairs = raw_citation_pairs(path, mw, sw, m_cited, s_cited) if kind == "similar" else path
-                match["raw_aligned_pairs"] = [list(pair) for pair in raw_pairs]
-                match["qualifying_aligned_pairs"] = [list(pair) for pair in path]
+                match["raw_aligned_pairs"] = [[m_map[a], s_map[b]] for a, b in raw_pairs]
+                match["qualifying_aligned_pairs"] = [list(pair) for pair in original_path]
+                details = alignment_details(raw_pairs, mw, sw, m_cited, s_cited)
+                details.update(manuscript_span=[ma, mb], source_span=[sa, sb],
+                               logical_manuscript_span=[path[0][0], path[-1][0] + 1],
+                               logical_source_span=[path[0][1], path[-1][1] + 1],
+                               header_removed_words=sum(headers[ma:mb]),
+                               source_header_removed_words=sum(s_headers[sa:sb]))
+                if details["seed"]:
+                    details["seed"]["aligned_pairs"] = [[m_map[a], s_map[b]] for a, b in details["seed"]["aligned_pairs"]]
+                details["citation_matches"]["aligned_pairs"] = [
+                    [m_map[a], s_map[b]] for a, b in details["citation_matches"]["aligned_pairs"]]
                 match["diagnostics"] = {
-                    **alignment_details(raw_pairs, mw, sw, m_cited, s_cited),
+                    **details,
                     "matched_word_count": len(path), "raw_matched_word_count": len(raw_pairs),
                     "source": sid, "source_content_sha256": row["source_content_sha256"],
                     "match_kind": kind, "exact_citation_policy": "unchanged; citation qualification correction applies to Similar",
@@ -512,6 +533,7 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
     for i, token in enumerate(mt):
         check()
         state = ("excluded-front-matter" if front[i] else "excluded-bibliography" if bib[i]
+                 else "excluded-running-header" if headers[i]
                  else "excluded-quotation" if exclude_quotes and quoted[i] else "exact" if i in all_exact
                  else "similar" if i in all_similar else "unmatched" if complete else "not-fully-checked")
         unmatched += int(state == "unmatched")
@@ -533,7 +555,7 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
                        score_denominator_words=denominator, eligible_words=denominator,
                        exact_percent=pct(n_exact), similar_only_percent=pct(n_similar), overlap_percent=pct(n_exact + n_similar))
     metrics = {
-        **accounting, "overlapping_words": len(covered), "overlap_percent": pct(len(covered)),
+        **accounting, "header_removed_words": sum(headers), "overlapping_words": len(covered), "overlap_percent": pct(len(covered)),
         "exact_words": len(all_exact), "similar_only_words": len(all_similar),
         "combined_words": len(covered), "combined_percent": pct(len(covered)),
         "exact_percent": pct(len(all_exact)), "similar_only_percent": pct(len(all_similar)),
@@ -562,6 +584,7 @@ def improved_report(manuscript: dict, sources: list[dict], *, config: dict | Non
                     "gap_and_span_accounting": "Original word positions, including intervening citations",
                 },
                 "normalization_version": NORMALIZATION_VERSION, "source_time_limit_seconds": source_seconds,
+                "layout_version": LAYOUT_VERSION,
                 "evidence_memory_policy": "live-retained-scored-priority-v1",
                 "total_time_limit_seconds": total_time_limit_seconds, "working_index_limit_mib": 128}
     return {
